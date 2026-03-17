@@ -1,5 +1,5 @@
 {
-  "auth_enabled": false,
+  "auth_enabled": true,
   "jwt_secret": "",
   "jwt_issuer": "multi-agent-orchestrator",
   "jwt_audience": "task-api",

@@ -1,8 +1,8 @@
 # Handoff Snapshot
 
-- Updated At: `2026-03-17T02:12:00Z`
+- Updated At: `2026-03-17T02:51:23Z`
 - Current Status: `done`
-- Current STEP_ID: `STEP-20260317-002`
+- Current STEP_ID: `STEP-20260317-003`
 
 ## Blockers
 
@@ -10,12 +10,12 @@
 
 ## Next Top 3
 
-1. Validate OSS leader election against a real bucket and confirm lease timing under network jitter.
-2. Exercise a real intranet IM webhook against the leader-gated ingress path.
-3. Decide operator workflow for replenishing provider balance via `/ops/budget`.
+1. Commit the hardening pass and capture a checkpoint after governance gates pass.
+2. Complete checkpoint metadata with commit hash/tag.
+3. Run governance gate and unit tests.
 
 ## Acceptance Criteria
 
-1. IM command ingress is leader-gated by OSS heartbeat lease state.
-2. Local runner enforces forbidden paths and physical stat-based path validation before fs or exec actions.
-3. Provider execution is blocked at adapter-entry when balance or daily budget is exhausted.
+1. API auth and RBAC default to deny and enter lockdown when disabled or misconfigured.
+2. Provider secret reads/writes require SUPER_ADMIN and MFA.
+3. Secret vault encrypts with PBKDF2-derived AES-256-GCM keys and upgrades legacy stores in place.

@@ -3,8 +3,12 @@ const assert = require("node:assert/strict");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const crypto = require("crypto");
 
-const { JsonFileSecretVault } = require("../src/platform/secretVault");
+const {
+  CURRENT_VAULT_VERSION,
+  JsonFileSecretVault
+} = require("../src/platform/secretVault");
 
 function createVaultForTest() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "secret-vault-"));
@@ -32,6 +36,11 @@ test("JsonFileSecretVault encrypts at rest and returns masked listing", () => {
 
   const raw = fs.readFileSync(filePath, "utf8");
   assert.equal(raw.includes("sk-test-openai-123456"), false);
+  const parsed = JSON.parse(raw);
+  assert.equal(parsed.version, CURRENT_VAULT_VERSION);
+  assert.equal(parsed.kdf.algorithm, "pbkdf2-sha512");
+  assert.equal(parsed.kdf.iterations >= 210000, true);
+  assert.equal(Boolean(parsed.kdf.salt), true);
 
   const value = vault.getSecret("OPENAI_API_KEY");
   assert.equal(value, "sk-test-openai-123456");
@@ -65,3 +74,43 @@ test("JsonFileSecretVault rotates master key and keeps secrets readable", () => 
   assert.equal(auditLines.some((line) => line.includes("SECRET_KEY_ROTATED")), true);
 });
 
+test("JsonFileSecretVault upgrades legacy sha256-derived vaults to PBKDF2", () => {
+  const { filePath, auditPath } = createVaultForTest();
+  const legacyKey = crypto.createHash("sha256").update("master-key-1", "utf8").digest();
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", legacyKey, iv);
+  let ciphertext = cipher.update("sk-legacy-value-123", "utf8", "base64");
+  ciphertext += cipher.final("base64");
+  const tag = cipher.getAuthTag().toString("base64");
+
+  fs.writeFileSync(filePath, `${JSON.stringify({
+    version: 1,
+    key_fingerprint: crypto.createHash("sha256").update("master-key-1", "utf8").digest("hex"),
+    updated_at: new Date().toISOString(),
+    entries: {
+      OPENAI_API_KEY: {
+        name: "OPENAI_API_KEY",
+        ciphertext,
+        iv: iv.toString("base64"),
+        tag,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        metadata: {}
+      }
+    }
+  }, null, 2)}\n`, "utf8");
+
+  const reopened = new JsonFileSecretVault({
+    filePath,
+    auditLogPath: auditPath,
+    masterKey: "master-key-1"
+  });
+  assert.equal(reopened.getSecret("OPENAI_API_KEY"), "sk-legacy-value-123");
+
+  const upgraded = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  assert.equal(upgraded.version, CURRENT_VAULT_VERSION);
+  assert.equal(Boolean(upgraded.kdf && upgraded.kdf.salt), true);
+
+  const auditLines = fs.readFileSync(auditPath, "utf8").trim().split(/\r?\n/).filter(Boolean);
+  assert.equal(auditLines.some((line) => line.includes("SECRET_VAULT_UPGRADED")), true);
+});

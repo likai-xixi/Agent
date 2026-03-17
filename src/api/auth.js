@@ -10,24 +10,70 @@ class AuthError extends Error {
   }
 }
 
+class AuthConfigError extends AuthError {
+  constructor(message, options = {}) {
+    super(message, {
+      ...options,
+      status: options.status || 503
+    });
+    this.name = "AuthConfigError";
+  }
+}
+
 const DEFAULT_API_AUTH_CONFIG = Object.freeze({
-  auth_enabled: false,
+  auth_enabled: true,
   jwt_secret: "",
   jwt_issuer: "",
   jwt_audience: "",
   static_tokens: []
 });
 
+function normalizeStaticTokens(input = []) {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+  return input
+    .map((item) => {
+      if (typeof item === "string") {
+        const token = String(item).trim();
+        if (!token) {
+          return null;
+        }
+        return {
+          token,
+          subject: "api-token-user",
+          roles: [],
+          mfa_verified: false
+        };
+      }
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        return null;
+      }
+      const token = String(item.token || "").trim();
+      if (!token) {
+        return null;
+      }
+      return {
+        token,
+        subject: String(item.subject || "api-token-user").trim() || "api-token-user",
+        role: String(item.role || "").trim(),
+        roles: Array.isArray(item.roles) ? item.roles : [],
+        mfa_verified: item.mfa_verified === true
+      };
+    })
+    .filter(Boolean);
+}
+
 function normalizeApiAuthConfig(raw = {}) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     return { ...DEFAULT_API_AUTH_CONFIG };
   }
   return {
-    auth_enabled: raw.auth_enabled === true,
+    auth_enabled: raw.auth_enabled !== false,
     jwt_secret: String(raw.jwt_secret || ""),
     jwt_issuer: String(raw.jwt_issuer || ""),
     jwt_audience: String(raw.jwt_audience || ""),
-    static_tokens: Array.isArray(raw.static_tokens) ? raw.static_tokens : []
+    static_tokens: normalizeStaticTokens(raw.static_tokens)
   };
 }
 
@@ -75,13 +121,34 @@ function parseTokenRoles(payload = {}) {
   return [];
 }
 
+function parseMfaVerified(payload = {}) {
+  if (payload.mfa === true || payload.mfa_verified === true) {
+    return true;
+  }
+  if (Array.isArray(payload.amr)) {
+    return payload.amr.some((item) => /^(mfa|otp|totp)$/i.test(String(item || "").trim()));
+  }
+  if (typeof payload.amr === "string") {
+    return /(^|[\s,])(mfa|otp|totp)([\s,]|$)/i.test(payload.amr);
+  }
+  return false;
+}
+
+function identityHasMfa(identity) {
+  return Boolean(identity && identity.mfa_verified === true);
+}
+
+function hasConfiguredCredentials(config = DEFAULT_API_AUTH_CONFIG) {
+  return Boolean(String(config.jwt_secret || "").trim()) || config.static_tokens.length > 0;
+}
+
 function toIdentity(base = {}) {
-  const subject = String(base.subject || "").trim() || "anonymous";
-  const roles = parseTokenRoles(base);
+  const subject = String(base.subject || "").trim() || "authenticated-user";
   return {
     subject,
-    roles: roles.length > 0 ? roles : ["super_admin"],
-    auth_type: String(base.auth_type || "none")
+    roles: parseTokenRoles(base),
+    auth_type: String(base.auth_type || "none"),
+    mfa_verified: identityHasMfa(base)
   };
 }
 
@@ -150,22 +217,13 @@ function verifyHs256Jwt(token, secret, options = {}) {
     subject: payload.sub || payload.subject || "jwt-user",
     role: payload.role || "",
     roles: payload.roles || [],
-    auth_type: "jwt"
+    auth_type: "jwt",
+    mfa_verified: parseMfaVerified(payload)
   };
 }
 
 function matchStaticToken(token, config) {
   for (const item of config.static_tokens) {
-    if (typeof item === "string") {
-      if (item === token) {
-        return {
-          subject: "api-token-user",
-          roles: ["super_admin"],
-          auth_type: "static_token"
-        };
-      }
-      continue;
-    }
     if (!item || typeof item !== "object") {
       continue;
     }
@@ -176,7 +234,8 @@ function matchStaticToken(token, config) {
       subject: item.subject || "api-token-user",
       role: item.role || "",
       roles: Array.isArray(item.roles) ? item.roles : [],
-      auth_type: "static_token"
+      auth_type: "static_token",
+      mfa_verified: item.mfa_verified === true
     };
   }
   return null;
@@ -186,14 +245,25 @@ function authenticateIncomingRequest(req, config = DEFAULT_API_AUTH_CONFIG) {
   const effectiveConfig = normalizeApiAuthConfig(config);
   if (effectiveConfig.auth_enabled !== true) {
     return {
-      required: false,
-      authenticated: true,
-      identity: toIdentity({
-        subject: "system",
-        roles: ["super_admin"],
-        auth_type: "disabled"
-      }),
-      token: ""
+      required: true,
+      authenticated: false,
+      identity: null,
+      token: "",
+      error: new AuthConfigError("API authentication is disabled; control plane is locked down.", {
+        code: "AUTH_LOCKDOWN"
+      })
+    };
+  }
+
+  if (!hasConfiguredCredentials(effectiveConfig)) {
+    return {
+      required: true,
+      authenticated: false,
+      identity: null,
+      token: "",
+      error: new AuthConfigError("API authentication is misconfigured; no bearer credential source is configured.", {
+        code: "AUTH_MISCONFIGURED"
+      })
     };
   }
 
@@ -284,9 +354,12 @@ function buildSignedJwt(payload = {}, secret = "secret", options = {}) {
 
 module.exports = {
   AuthError,
+  AuthConfigError,
   DEFAULT_API_AUTH_CONFIG,
   authenticateIncomingRequest,
   buildSignedJwt,
+  hasConfiguredCredentials,
+  identityHasMfa,
   loadApiAuthConfig,
   normalizeApiAuthConfig,
   verifyHs256Jwt

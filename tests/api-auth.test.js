@@ -32,7 +32,11 @@ function createServerWithAuth(authConfig) {
     orchestrator,
     host: "127.0.0.1",
     port: 0,
-    authConfig
+    authConfig,
+    rbacConfig: {
+      rbac_enabled: true,
+      default_roles: []
+    }
   });
 }
 
@@ -155,3 +159,28 @@ test("task API accepts HS256 JWT and records identity actor", async () => {
   }
 });
 
+test("task API locks down when auth is disabled or missing credentials", async () => {
+  const app = createServerWithAuth({
+    auth_enabled: false,
+    static_tokens: [
+      {
+        token: "token-admin",
+        subject: "ops-admin",
+        roles: ["super_admin"],
+        mfa_verified: true
+      }
+    ]
+  });
+  const { port } = await app.start();
+  const baseUrl = `http://127.0.0.1:${port}`;
+
+  try {
+    const locked = await requestJson(baseUrl, "GET", "/health", null, {
+      Authorization: "Bearer token-admin"
+    });
+    assert.equal(locked.status, 503);
+    assert.equal(locked.payload.error, "AUTH_LOCKDOWN");
+  } finally {
+    await app.stop();
+  }
+});

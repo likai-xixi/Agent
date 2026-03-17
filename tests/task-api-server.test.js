@@ -10,6 +10,10 @@ const { JsonlAuditEventStore } = require("../src/orchestrator/auditEventStore");
 const { TaskOrchestrator } = require("../src/orchestrator/orchestratorService");
 const { TASK_STATES } = require("../src/orchestrator/taskStateMachine");
 
+const TEST_AUTH_HEADERS = Object.freeze({
+  Authorization: "Bearer test-super-admin-token"
+});
+
 function buildFlags(overrides = {}) {
   return {
     fallback_engine_enabled: false,
@@ -36,11 +40,26 @@ function createServerForTest(flags = buildFlags(), options = {}) {
     orchestrator,
     host: "127.0.0.1",
     port: 0,
+    authConfig: {
+      auth_enabled: true,
+      static_tokens: [
+        {
+          token: "test-super-admin-token",
+          subject: "test-suite",
+          roles: ["super_admin"],
+          mfa_verified: true
+        }
+      ]
+    },
+    rbacConfig: {
+      rbac_enabled: true,
+      default_roles: []
+    },
     ...options
   });
 }
 
-async function requestJson(baseUrl, method, pathname, body) {
+async function requestJson(baseUrl, method, pathname, body, headers = TEST_AUTH_HEADERS) {
   async function attemptRequest() {
     const target = new URL(`${baseUrl}${pathname}`);
     const payload = body ? JSON.stringify(body) : "";
@@ -54,7 +73,8 @@ async function requestJson(baseUrl, method, pathname, body) {
         method,
         headers: {
           "Content-Type": "application/json",
-          "Content-Length": Buffer.byteLength(payload)
+          "Content-Length": Buffer.byteLength(payload),
+          ...headers
         }
       });
 
@@ -575,9 +595,18 @@ test("task API audit integrity endpoint reports tampered audit log", async () =>
     });
     const filePath = app.orchestrator.eventStore.filePath;
     const lines = fs.readFileSync(filePath, "utf8").trim().split(/\r?\n/);
-    const first = JSON.parse(lines[0]);
-    first.payload.task_snapshot.task_type = "tampered";
-    lines[0] = JSON.stringify(first);
+    const targetIndex = lines.findIndex((line) => {
+      try {
+        const parsed = JSON.parse(line);
+        return Boolean(parsed && parsed.payload && parsed.payload.task_snapshot);
+      } catch {
+        return false;
+      }
+    });
+    assert.notEqual(targetIndex, -1);
+    const tampered = JSON.parse(lines[targetIndex]);
+    tampered.payload.task_snapshot.task_type = "tampered";
+    lines[targetIndex] = JSON.stringify(tampered);
     fs.writeFileSync(filePath, `${lines.join("\n")}\n`, "utf8");
 
     const integrity = await requestJson(baseUrl, "GET", "/audit/integrity");
@@ -592,6 +621,7 @@ test("task API can recover task state after restart with runtime SQLite persiste
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "task-api-runtime-db-"));
   const configDir = path.join(dir, "config");
   fs.mkdirSync(configDir, { recursive: true });
+  const authConfigPath = path.join(configDir, "api_auth.json");
   const featureFlagPath = path.join(configDir, "feature_flags.json");
   const providerProfilePath = path.join(configDir, "provider_profiles.json");
   const rbacConfigPath = path.join(configDir, "rbac_policy.json");
@@ -599,6 +629,17 @@ test("task API can recover task state after restart with runtime SQLite persiste
   const runtimeDbConfigPath = path.join(configDir, "runtime_db.json");
   const runtimeDbPath = path.join(dir, "runtime-state.db");
 
+  fs.writeFileSync(authConfigPath, `${JSON.stringify({
+    auth_enabled: true,
+    static_tokens: [
+      {
+        token: "test-super-admin-token",
+        subject: "test-suite",
+        roles: ["super_admin"],
+        mfa_verified: true
+      }
+    ]
+  }, null, 2)}\n`, "utf8");
   fs.writeFileSync(featureFlagPath, `${JSON.stringify(buildFlags(), null, 2)}\n`, "utf8");
   fs.writeFileSync(providerProfilePath, `${JSON.stringify({
     openai: { default_model: "gpt-4.1", cost_per_1k_tokens: 0.02, latency_weight_hint: 0.6 },
@@ -607,8 +648,8 @@ test("task API can recover task state after restart with runtime SQLite persiste
     local: { default_model: "llama3.1:8b", cost_per_1k_tokens: 0.002, latency_weight_hint: 0.5 }
   }, null, 2)}\n`, "utf8");
   fs.writeFileSync(rbacConfigPath, `${JSON.stringify({
-    rbac_enabled: false,
-    default_roles: ["super_admin"]
+    rbac_enabled: true,
+    default_roles: []
   }, null, 2)}\n`, "utf8");
   fs.writeFileSync(secretVaultConfigPath, `${JSON.stringify({
     vault_file: path.join(dir, "secret-vault.json"),
@@ -623,6 +664,7 @@ test("task API can recover task state after restart with runtime SQLite persiste
   let app = createTaskApiServer({
     host: "127.0.0.1",
     port: 0,
+    authConfigPath,
     featureFlagPath,
     providerProfilePath,
     rbacConfigPath,
@@ -645,6 +687,7 @@ test("task API can recover task state after restart with runtime SQLite persiste
   app = createTaskApiServer({
     host: "127.0.0.1",
     port: 0,
+    authConfigPath,
     featureFlagPath,
     providerProfilePath,
     rbacConfigPath,

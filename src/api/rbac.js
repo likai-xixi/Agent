@@ -7,8 +7,8 @@ const RBAC_ROLES = Object.freeze({
 });
 
 const DEFAULT_RBAC_CONFIG = Object.freeze({
-  rbac_enabled: false,
-  default_roles: [RBAC_ROLES.SUPER_ADMIN]
+  rbac_enabled: true,
+  default_roles: []
 });
 
 const ALL_ROLES = Object.freeze([
@@ -24,7 +24,12 @@ const DEFAULT_ROUTE_RULES = Object.freeze([
   { id: "settings_flags_read", method: "GET", pattern: /^\/settings\/feature-flags$/, roles: ALL_ROLES },
   { id: "settings_profiles_read", method: "GET", pattern: /^\/settings\/provider-profiles$/, roles: ALL_ROLES },
   { id: "settings_rbac_read", method: "GET", pattern: /^\/settings\/rbac$/, roles: ALL_ROLES },
-  { id: "settings_secrets_read", method: "GET", pattern: /^\/settings\/provider-secrets$/, roles: ALL_ROLES },
+  {
+    id: "settings_secrets_read",
+    method: "GET",
+    pattern: /^\/settings\/provider-secrets$/,
+    roles: [RBAC_ROLES.SUPER_ADMIN]
+  },
   { id: "audit_read", method: "GET", pattern: /^\/audit\/(events|integrity)$/, roles: ALL_ROLES },
   { id: "routing_preview", method: "GET", pattern: /^\/routing\/preview$/, roles: ALL_ROLES },
   { id: "task_read", method: "GET", pattern: /^\/tasks\/[^/]+$/, roles: ALL_ROLES },
@@ -57,7 +62,7 @@ const DEFAULT_ROUTE_RULES = Object.freeze([
     id: "settings_secrets_write",
     method: "POST",
     pattern: /^\/settings\/provider-secrets$/,
-    roles: [RBAC_ROLES.SUPER_ADMIN, RBAC_ROLES.TASK_ADMIN]
+    roles: [RBAC_ROLES.SUPER_ADMIN]
   },
   {
     id: "task_write",
@@ -90,6 +95,12 @@ const DEFAULT_ROUTE_RULES = Object.freeze([
     roles: [RBAC_ROLES.SUPER_ADMIN, RBAC_ROLES.TASK_ADMIN]
   },
   {
+    id: "integration_im_command_write",
+    method: "POST",
+    pattern: /^\/integrations\/im\/commands$/,
+    roles: [RBAC_ROLES.SUPER_ADMIN, RBAC_ROLES.TASK_ADMIN]
+  },
+  {
     id: "ops_discovery_run",
     method: "POST",
     pattern: /^\/ops\/discovery\/run$/,
@@ -115,7 +126,7 @@ function normalizeRbacConfig(raw = {}) {
     return { ...DEFAULT_RBAC_CONFIG };
   }
   return {
-    rbac_enabled: raw.rbac_enabled === true,
+    rbac_enabled: raw.rbac_enabled !== false,
     default_roles: normalizeRoles(raw.default_roles || DEFAULT_RBAC_CONFIG.default_roles)
   };
 }
@@ -143,10 +154,10 @@ function resolveAllowedRoles(method, pathname, config) {
     }
   }
   return {
-    rule_id: "default",
+    rule_id: "default-deny",
     allowed_roles: config.default_roles.length > 0
       ? config.default_roles
-      : [RBAC_ROLES.SUPER_ADMIN]
+      : []
   };
 }
 
@@ -159,15 +170,25 @@ function authorizeRequest({
   const effectiveConfig = normalizeRbacConfig(config);
   if (effectiveConfig.rbac_enabled !== true) {
     return {
-      allowed: true,
-      reason: "RBAC_DISABLED",
-      rule_id: "rbac-disabled",
-      allowed_roles: []
+      allowed: false,
+      reason: "RBAC_LOCKDOWN",
+      rule_id: "rbac-lockdown",
+      allowed_roles: [],
+      identity_roles: []
     };
   }
   const roles = identity && Array.isArray(identity.roles)
     ? normalizeRoles(identity.roles)
-    : [...effectiveConfig.default_roles];
+    : [];
+  if (roles.length === 0) {
+    return {
+      allowed: false,
+      reason: "ROLE_MISSING",
+      rule_id: "identity-missing",
+      allowed_roles: [],
+      identity_roles: []
+    };
+  }
   const policy = resolveAllowedRoles(method, pathname, effectiveConfig);
   const matched = roles.some((role) => policy.allowed_roles.includes(role));
   return {

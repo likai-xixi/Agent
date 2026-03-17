@@ -6,6 +6,8 @@ const { TASK_STATES, applyTransition, canTransition, createTaskSnapshot } = requ
 
 test("state machine allows expected transitions", () => {
   assert.equal(canTransition(TASK_STATES.PENDING, TASK_STATES.RUNNING), true);
+  assert.equal(canTransition(TASK_STATES.RUNNING, TASK_STATES.WAITING_FOR_AUTH), true);
+  assert.equal(canTransition(TASK_STATES.WAITING_FOR_AUTH, TASK_STATES.RUNNING), true);
   assert.equal(canTransition(TASK_STATES.RUNNING, TASK_STATES.WAITING_HUMAN), true);
   assert.equal(canTransition(TASK_STATES.WAITING_HUMAN, TASK_STATES.RUNNING), true);
   assert.equal(canTransition(TASK_STATES.RUNNING, TASK_STATES.SUCCEEDED), true);
@@ -41,4 +43,3 @@ test("applyTransition rejects illegal transitions", () => {
 
   assert.throws(() => applyTransition(task, TASK_STATES.SUCCEEDED), ValidationError);
 });
-

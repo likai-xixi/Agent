@@ -33,6 +33,7 @@ const { createImNotifierFromEnv } = require("../takeover/imNotifier");
 const {
   AuthError,
   authenticateIncomingRequest,
+  identityHasMfa,
   loadApiAuthConfig,
   normalizeApiAuthConfig
 } = require("./auth");
@@ -316,6 +317,7 @@ function appendAuthAuditEvent(orchestrator, eventType, payload = {}, actor = "ta
 }
 
 function createTaskApiServer(options = {}) {
+  const authConfigPath = options.authConfigPath || "config/api_auth.json";
   const featureFlagPath = options.featureFlagPath || "config/feature_flags.json";
   const providerProfilePath = options.providerProfilePath || "config/provider_profiles.json";
   const rbacConfigPath = options.rbacConfigPath || "config/rbac_policy.json";
@@ -409,7 +411,35 @@ function createTaskApiServer(options = {}) {
       orchestrator.providerRouter.profiles = initialProfiles;
     }
   }
-  const authConfig = normalizeApiAuthConfig(options.authConfig || loadApiAuthConfig(options.authConfigPath));
+  if (typeof localExecutor.setTaskStateUpdater === "function") {
+    localExecutor.setTaskStateUpdater(async ({
+      task_id,
+      to_state,
+      actor = "local-runner",
+      reason = "awaiting_user_consent",
+      metadata = {}
+    }) => {
+      if (!task_id || !orchestrator || typeof orchestrator.getTask !== "function") {
+        return null;
+      }
+      const current = orchestrator.getTask(task_id);
+      if (!current) {
+        return null;
+      }
+      if (current.state === to_state) {
+        return current;
+      }
+      return orchestrator.transitionTask({
+        task_id,
+        to_state,
+        actor,
+        source: "local-executor",
+        reason,
+        metadata
+      });
+    });
+  }
+  const authConfig = normalizeApiAuthConfig(options.authConfig || loadApiAuthConfig(authConfigPath));
   const rbacConfig = normalizeRbacConfig(options.rbacConfig || loadRbacConfig(rbacConfigPath));
   const secretVaultConfig = loadSecretVaultConfig(secretVaultConfigPath);
   const secretVaultMasterKey = String(options.secretVaultMasterKey || process.env[secretVaultConfig.master_key_env] || "");
@@ -506,6 +536,22 @@ function createTaskApiServer(options = {}) {
     };
   }
 
+  function assertSuperAdminMfa(identity) {
+    const roles = identity && Array.isArray(identity.roles) ? identity.roles : [];
+    if (!roles.includes(RBAC_ROLES.SUPER_ADMIN)) {
+      throw new AuthError("SUPER_ADMIN role is required for secret vault access", {
+        code: "SUPER_ADMIN_REQUIRED",
+        status: 403
+      });
+    }
+    if (!identityHasMfa(identity)) {
+      throw new AuthError("MFA verification is required for secret vault access", {
+        code: "MFA_REQUIRED",
+        status: 403
+      });
+    }
+  }
+
   function collectBackupFiles() {
     const files = [];
     if (orchestrator.eventStore && orchestrator.eventStore.filePath) {
@@ -538,13 +584,13 @@ function createTaskApiServer(options = {}) {
       const pathname = requestUrl.pathname;
       const method = req.method || "GET";
       const authResult = authenticateIncomingRequest(req, authConfig);
-      const forceIdentityActor = authConfig.auth_enabled === true;
+      const forceIdentityActor = authResult.required === true;
       const requestIdentity = authResult.identity;
       const requestSource = requestIdentity && requestIdentity.auth_type
         ? `http-${requestIdentity.auth_type}`
         : "http";
 
-      if (forceIdentityActor && authResult.authenticated !== true) {
+      if (authResult.required === true && authResult.authenticated !== true) {
         const authError = authResult.error instanceof AuthError
           ? authResult.error
           : new AuthError("Unauthorized request", { code: "AUTH_REQUIRED", status: 401 });
@@ -560,7 +606,7 @@ function createTaskApiServer(options = {}) {
         return;
       }
 
-      if (forceIdentityActor && requestIdentity) {
+      if (requestIdentity) {
         appendAuthAuditEvent(orchestrator, API_AUTH_ACCEPTED, {
           method,
           pathname,
@@ -575,23 +621,27 @@ function createTaskApiServer(options = {}) {
         identity: requestIdentity,
         config: rbacConfig
       });
-      if (rbacConfig.rbac_enabled === true && authorization.allowed !== true) {
+      if (authorization.allowed !== true) {
+        const lockdown = authorization.reason === "RBAC_LOCKDOWN";
         appendAuthAuditEvent(orchestrator, API_AUTHZ_DENIED, {
           method,
           pathname,
           subject: requestIdentity ? requestIdentity.subject : "anonymous",
           roles: requestIdentity ? requestIdentity.roles : [],
           rule_id: authorization.rule_id,
-          required_roles: authorization.allowed_roles
+          required_roles: authorization.allowed_roles,
+          reason: authorization.reason
         }, requestIdentity ? requestIdentity.subject : "task-api");
-        jsonResponse(res, 403, {
-          error: "FORBIDDEN",
-          message: "Role is not allowed to access this endpoint",
+        jsonResponse(res, lockdown ? 503 : 403, {
+          error: lockdown ? "RBAC_LOCKDOWN" : "FORBIDDEN",
+          message: lockdown
+            ? "RBAC is disabled or invalid; control plane is locked down."
+            : "Role is not allowed to access this endpoint",
           rule_id: authorization.rule_id
         });
         return;
       }
-      if (rbacConfig.rbac_enabled === true && requestIdentity) {
+      if (requestIdentity) {
         appendAuthAuditEvent(orchestrator, API_AUTHZ_ALLOWED, {
           method,
           pathname,
@@ -727,11 +777,13 @@ function createTaskApiServer(options = {}) {
       }
 
       if (method === "GET" && pathname === "/settings/provider-secrets") {
+        assertSuperAdminMfa(requestIdentity);
         jsonResponse(res, 200, listProviderSecretsMasked());
         return;
       }
 
       if (method === "POST" && pathname === "/settings/provider-secrets") {
+        assertSuperAdminMfa(requestIdentity);
         const body = await parseJsonBody(req);
         const name = String(body.name || "").trim();
         const value = String(body.value || "");

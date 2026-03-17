@@ -1,5 +1,5 @@
 {
-  "rbac_enabled": false,
+  "rbac_enabled": true,
   "default_roles": [
     "super_admin"
   ]

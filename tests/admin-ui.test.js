@@ -9,6 +9,10 @@ const { createTaskApiServer } = require("../src/api/taskApiServer");
 const { JsonlAuditEventStore } = require("../src/orchestrator/auditEventStore");
 const { TaskOrchestrator } = require("../src/orchestrator/orchestratorService");
 
+const TEST_AUTH_HEADERS = Object.freeze({
+  Authorization: "Bearer admin-ui-super-admin-token"
+});
+
 function buildFlags(overrides = {}) {
   return {
     fallback_engine_enabled: false,
@@ -32,10 +36,28 @@ function createServerForTest(flags = buildFlags(), options = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "admin-ui-api-"));
   const configDir = path.join(dir, "config");
   const filePath = path.join(dir, "events.jsonl");
+  const authConfigPath = path.join(configDir, "api_auth.json");
   const featureFlagPath = path.join(configDir, "feature_flags.json");
   const providerProfilePath = path.join(configDir, "provider_profiles.json");
   const rbacConfigPath = path.join(configDir, "rbac_policy.json");
   const secretVaultConfigPath = path.join(configDir, "secret_vault.json");
+  writeJson(authConfigPath, {
+    auth_enabled: true,
+    static_tokens: [
+      {
+        token: "admin-ui-super-admin-token",
+        subject: "admin-ui-user",
+        roles: ["super_admin"],
+        mfa_verified: true
+      },
+      {
+        token: "admin-ui-super-admin-no-mfa-token",
+        subject: "admin-ui-user-no-mfa",
+        roles: ["super_admin"],
+        mfa_verified: false
+      }
+    ]
+  });
   writeJson(featureFlagPath, flags);
   writeJson(providerProfilePath, {
     openai: {
@@ -60,8 +82,8 @@ function createServerForTest(flags = buildFlags(), options = {}) {
     }
   });
   writeJson(rbacConfigPath, {
-    rbac_enabled: false,
-    default_roles: ["super_admin"]
+    rbac_enabled: true,
+    default_roles: []
   });
   writeJson(secretVaultConfigPath, {
     vault_file: path.join(dir, "secret-vault.json"),
@@ -78,6 +100,7 @@ function createServerForTest(flags = buildFlags(), options = {}) {
     orchestrator,
     host: "127.0.0.1",
     port: 0,
+    authConfigPath,
     featureFlagPath,
     providerProfilePath,
     rbacConfigPath,
@@ -86,7 +109,7 @@ function createServerForTest(flags = buildFlags(), options = {}) {
   });
 }
 
-async function requestRaw(baseUrl, method, pathname, body = null) {
+async function requestRaw(baseUrl, method, pathname, body = null, headers = TEST_AUTH_HEADERS) {
   const target = new URL(`${baseUrl}${pathname}`);
   const payload = body ? JSON.stringify(body) : "";
   return new Promise((resolve, reject) => {
@@ -96,11 +119,12 @@ async function requestRaw(baseUrl, method, pathname, body = null) {
       port: target.port,
       path: `${target.pathname}${target.search}`,
       method,
-      headers: {
-        "Content-Type": "application/json",
-        "Content-Length": Buffer.byteLength(payload)
-      }
-    });
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(payload),
+          ...headers
+        }
+      });
     req.on("error", reject);
     req.on("response", (res) => {
       let raw = "";
@@ -122,8 +146,8 @@ async function requestRaw(baseUrl, method, pathname, body = null) {
   });
 }
 
-async function requestJson(baseUrl, method, pathname, body = null) {
-  const response = await requestRaw(baseUrl, method, pathname, body);
+async function requestJson(baseUrl, method, pathname, body = null, headers = TEST_AUTH_HEADERS) {
+  const response = await requestRaw(baseUrl, method, pathname, body, headers);
   return {
     status: response.status,
     payload: response.text ? JSON.parse(response.text) : {}
@@ -236,7 +260,7 @@ test("settings endpoints update runtime config and keep secrets masked", async (
 
     const updatedRbac = await requestJson(baseUrl, "PUT", "/settings/rbac", {
       rbac: {
-        rbac_enabled: false,
+        rbac_enabled: true,
         default_roles: ["super_admin", "task_admin"]
       }
     });
@@ -257,6 +281,29 @@ test("settings endpoints update runtime config and keep secrets masked", async (
     const openaiSecret = secrets.payload.secrets.find((item) => item.name === "OPENAI_API_KEY");
     assert.equal(Boolean(openaiSecret), true);
     assert.equal(openaiSecret.masked_value.includes("***"), true);
+  } finally {
+    await app.stop();
+  }
+});
+
+test("provider secrets endpoint requires MFA even for super admin", async () => {
+  const app = createServerForTest(buildFlags(), {
+    secretVaultMasterKey: "unit-test-master-key"
+  });
+  const { port } = await app.start();
+  const baseUrl = `http://127.0.0.1:${port}`;
+
+  try {
+    const denied = await requestJson(baseUrl, "GET", "/settings/provider-secrets", null, {
+      Authorization: "Bearer admin-ui-super-admin-no-mfa-token"
+    });
+    assert.equal(denied.status, 403);
+    assert.equal(denied.payload.error, "MFA_REQUIRED");
+
+    const lockedMfa = await requestJson(baseUrl, "GET", "/settings/provider-secrets", null, {
+      Authorization: "Bearer admin-ui-super-admin-token"
+    });
+    assert.equal(lockedMfa.status, 200);
   } finally {
     await app.stop();
   }

@@ -13,7 +13,7 @@ function clone(value) {
 }
 
 function normalizeRulePath(targetPath) {
-  return path.resolve(String(targetPath || ""));
+  return path.resolve(String(targetPath || "")).toLowerCase();
 }
 
 class JsonFilePolicyStore {

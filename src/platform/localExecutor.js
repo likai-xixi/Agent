@@ -2,39 +2,89 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const cp = require("child_process");
+const { randomUUID } = require("crypto");
 
-const { ValidationError } = require("./contracts");
+const { normalizePortablePath } = require("./appPaths");
+const { ValidationError, nowUtcIso } = require("./contracts");
 const { AuthorizationRequiredError, AuthorizationWorkflowManager } = require("./authorizationWorkflow");
-const { JsonlStepJournal } = require("./checkpointJournal");
+const { JsonlStepJournal, STEP_STATUSES } = require("./checkpointJournal");
 const { GitSafetyManager } = require("./gitSafety");
+const { TASK_STATES } = require("../orchestrator/taskStateMachine");
 const { scrubSensitiveData } = require("./sensitiveData");
 const { ensureTraceId } = require("./trace");
 
-const FORBIDDEN_PATHS = Object.freeze([
-  "C:/Windows",
-  "C:/Windows/System32",
-  "C:/Program Files",
-  "C:/Program Files (x86)"
-].map((item) => path.resolve(item)));
+const FORBIDDEN_ZONES = Object.freeze([
+  "C:\\Windows",
+  "C:\\System32",
+  "C:\\Users\\Administrator",
+  "C:\\Program Files",
+  "C:\\Program Files (x86)",
+  "\\Device\\",
+  "\\\\.\\"
+].map((item) => String(item).toLowerCase()));
+const FORBIDDEN_PATHS = FORBIDDEN_ZONES;
+const DEFAULT_WORKSPACE_ROOT = path.resolve(process.env.STORAGE_PATH || "./data");
 
 function normalizeTargetPath(targetPath) {
   return path.resolve(String(targetPath || ""));
+}
+
+function normalizeComparisonPath(targetPath) {
+  return normalizeTargetPath(targetPath).toLowerCase();
+}
+
+function normalizeRawPath(targetPath) {
+  return String(targetPath || "").trim().toLowerCase();
+}
+
+function createPathPrefixMatcher(rootPath) {
+  const normalizedRoot = normalizeComparisonPath(rootPath).replace(/[\\/]+$/, "");
+  return {
+    exact: normalizedRoot,
+    nested: `${normalizedRoot}${path.sep.toLowerCase()}`
+  };
 }
 
 function isWithinRoot(targetPath, rootPath) {
   if (!rootPath) {
     return false;
   }
-  const relative = path.relative(path.resolve(rootPath), path.resolve(targetPath));
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  const normalizedTarget = normalizeComparisonPath(targetPath);
+  const matcher = createPathPrefixMatcher(rootPath);
+  return normalizedTarget === matcher.exact || normalizedTarget.startsWith(matcher.nested);
+}
+
+function isInForbiddenZone(targetPath) {
+  const normalizedTarget = normalizeComparisonPath(targetPath);
+  const rawTarget = normalizeRawPath(targetPath);
+  return FORBIDDEN_ZONES.some((zone) => (
+    normalizedTarget.startsWith(zone) || rawTarget.startsWith(zone)
+  ));
+}
+
+class LocalSecurityGatewayError extends ValidationError {
+  constructor(code, message, options = {}) {
+    super(`${code}: ${message}`);
+    this.name = "LocalSecurityGatewayError";
+    this.code = code;
+    this.status = options.status || 409;
+    this.details = options.details || {};
+  }
 }
 
 function assertForbiddenPath(targetPath) {
-  const normalized = normalizeTargetPath(targetPath);
-  for (const forbiddenRoot of FORBIDDEN_PATHS) {
-    if (normalized === forbiddenRoot || normalized.startsWith(`${forbiddenRoot}${path.sep}`)) {
-      throw new ValidationError(`Forbidden local path: ${normalized}`);
-    }
+  const absoluteTarget = normalizeTargetPath(targetPath);
+  if (isInForbiddenZone(absoluteTarget)) {
+    throw new LocalSecurityGatewayError(
+      "SECURITY_VIOLATION",
+      `AI attempted to access a protected system path: ${absoluteTarget}`,
+      {
+        status: 403,
+        details: {
+          target_path: absoluteTarget
+        }
+      }
+    );
   }
 }
 
@@ -64,16 +114,43 @@ function assertPathReality(targetPath, options = {}) {
   }
 
   if (!allowMissingLeaf) {
-    throw new ValidationError(`Path does not exist for ${operation}: ${normalized}`);
+    throw new LocalSecurityGatewayError(
+      "PHYSICAL_CHECK_FAILED",
+      `AI hallucinated a missing path during ${operation}: ${normalized}`,
+      {
+        details: {
+          target_path: normalized,
+          operation
+        }
+      }
+    );
   }
 
   const parentDir = path.dirname(normalized);
   if (!fs.existsSync(parentDir)) {
-    throw new ValidationError(`Parent directory does not exist for ${operation}: ${parentDir}`);
+    throw new LocalSecurityGatewayError(
+      "PHYSICAL_CHECK_FAILED",
+      `Parent directory does not exist for ${operation}: ${parentDir}`,
+      {
+        details: {
+          parent_dir: parentDir,
+          operation
+        }
+      }
+    );
   }
   const parentStats = fs.statSync(parentDir);
   if (!parentStats.isDirectory()) {
-    throw new ValidationError(`Parent directory is not a directory for ${operation}: ${parentDir}`);
+    throw new LocalSecurityGatewayError(
+      "PHYSICAL_CHECK_FAILED",
+      `Parent directory is not a directory for ${operation}: ${parentDir}`,
+      {
+        details: {
+          parent_dir: parentDir,
+          operation
+        }
+      }
+    );
   }
   return {
     normalized_path: normalized,
@@ -202,7 +279,8 @@ class ResourceGuardian {
 
 class LocalExecutor {
   constructor(options = {}) {
-    this.workspaceRoot = path.resolve(options.workspaceRoot || process.cwd());
+    this.workspaceRoot = path.resolve(options.workspaceRoot || DEFAULT_WORKSPACE_ROOT);
+    this.workspaceRootComparison = normalizeComparisonPath(this.workspaceRoot);
     this.authorizationWorkflow = options.authorizationWorkflow || new AuthorizationWorkflowManager({
       notifier: options.notifier
     });
@@ -212,17 +290,286 @@ class LocalExecutor {
     });
     this.stepJournal = options.stepJournal || new JsonlStepJournal(options.stepJournalOptions || {});
     this.resourceGuardian = options.resourceGuardian || new ResourceGuardian(options.resourceGuardianOptions || {});
+    this.taskStateUpdater = typeof options.taskStateUpdater === "function" ? options.taskStateUpdater : null;
   }
 
-  async assertAuthorizedPath({ trace_id, task_id, actor, targetPath }) {
-    assertForbiddenPath(targetPath);
-    return this.authorizationWorkflow.ensurePathAuthorized({
+  setTaskStateUpdater(taskStateUpdater) {
+    this.taskStateUpdater = typeof taskStateUpdater === "function" ? taskStateUpdater : null;
+  }
+
+  appendSecurityEvidence({
+    trace_id,
+    task_id,
+    actor = "local-runner",
+    command = "",
+    stage = "security_gate",
+    status = STEP_STATUSES.CHECKPOINTED,
+    target_path = "",
+    metadata = {}
+  }) {
+    return this.stepJournal.append({
+      step_run_id: randomUUID(),
+      trace_id,
+      task_id,
+      operation: "LOCAL_SECURITY_GATEWAY",
+      stage,
+      resumable: false,
+      metadata: {
+        actor,
+        command,
+        target_path,
+        ...metadata
+      },
+      resume_state: {
+        target_path: target_path ? normalizePortablePath(target_path) : "",
+        workspace_root: normalizePortablePath(this.workspaceRoot)
+      },
+      status,
+      timestamp: nowUtcIso()
+    });
+  }
+
+  async transitionTaskToWaitingForAuth({
+    trace_id,
+    task_id,
+    actor = "local-runner",
+    command = "",
+    target_path = "",
+    request_id = ""
+  }) {
+    if (!this.taskStateUpdater || !task_id) {
+      return null;
+    }
+    try {
+      return await Promise.resolve(this.taskStateUpdater({
+        trace_id,
+        task_id,
+        actor,
+        to_state: TASK_STATES.WAITING_FOR_AUTH,
+        reason: "awaiting_user_consent",
+        metadata: {
+          command,
+          target_path,
+          request_id
+        }
+      }));
+    } catch {
+      return null;
+    }
+  }
+
+  findLatestPathAuthorization(targetPath, taskId = "") {
+    const targetComparison = normalizeComparisonPath(targetPath);
+    const requests = this.authorizationWorkflow.requestStore.list()
+      .filter((item) => item.request_type === "PATH_ACCESS")
+      .filter((item) => !taskId || item.task_id === taskId)
+      .filter((item) => normalizeComparisonPath(item.resource && item.resource.target_path ? item.resource.target_path : "") === targetComparison)
+      .sort((left, right) => String(left.created_at || "").localeCompare(String(right.created_at || "")));
+    if (requests.length === 0) {
+      return null;
+    }
+    return requests[requests.length - 1];
+  }
+
+  async requestUserConsent({
+    trace_id,
+    task_id,
+    actor = "local-runner",
+    command,
+    absoluteTarget
+  }) {
+    const latestDecision = this.findLatestPathAuthorization(absoluteTarget, task_id);
+    if (latestDecision && latestDecision.status === "DENIED") {
+      this.appendSecurityEvidence({
+        trace_id,
+        task_id,
+        actor,
+        command,
+        target_path: absoluteTarget,
+        stage: "authorization_denied",
+        status: STEP_STATUSES.FAILED,
+        metadata: {
+          code: "USER_DENIED",
+          request_id: latestDecision.request_id
+        }
+      });
+      throw new LocalSecurityGatewayError(
+        "USER_DENIED",
+        "User denied access to a path outside the workspace",
+        {
+          status: 403,
+          details: {
+            target_path: absoluteTarget,
+            request_id: latestDecision.request_id
+          }
+        }
+      );
+    }
+
+    const request = latestDecision && latestDecision.status === "PENDING"
+      ? latestDecision
+      : await this.authorizationWorkflow.requestAuthorization({
+          trace_id,
+          task_id,
+          request_type: "PATH_ACCESS",
+          resource: {
+            target_path: absoluteTarget,
+            workspace_root: this.workspaceRoot
+          },
+          actor,
+          options: {
+            grant_modes: ["single", "permanent"]
+          },
+          rationale: "Cross-workspace path access requires explicit approval."
+        });
+
+    const waitingTask = await this.transitionTaskToWaitingForAuth({
       trace_id,
       task_id,
       actor,
-      targetPath,
+      command,
+      target_path: absoluteTarget,
+      request_id: request.request_id
+    });
+    this.appendSecurityEvidence({
+      trace_id,
+      task_id,
+      actor,
+      command,
+      target_path: absoluteTarget,
+      stage: "authorization_requested",
+      status: STEP_STATUSES.CHECKPOINTED,
+      metadata: {
+        code: "WAITING_FOR_AUTH",
+        request_id: request.request_id,
+        task_state: waitingTask && waitingTask.state ? waitingTask.state : TASK_STATES.WAITING_FOR_AUTH
+      }
+    });
+
+    const error = new AuthorizationRequiredError(
+      `WAITING_FOR_AUTH: user consent required for path access ${absoluteTarget}`,
+      {
+        code: "WAITING_FOR_AUTH",
+        request
+      }
+    );
+    error.failed_task = waitingTask || null;
+    throw error;
+  }
+
+  async validatePathAccess({
+    trace_id,
+    task_id,
+    actor = "local-runner",
+    command,
+    targetPath,
+    requireDirectory = false,
+    requireFile = false,
+    requireExisting = false,
+    allowMissingLeaf = false
+  }) {
+    const traceId = ensureTraceId(trace_id, "runner");
+    const absoluteTarget = normalizeTargetPath(targetPath);
+    const normalizedTarget = normalizeComparisonPath(targetPath);
+    const normalizedCommand = String(command || "").toLowerCase();
+
+    if (isInForbiddenZone(absoluteTarget)) {
+      this.appendSecurityEvidence({
+        trace_id: traceId,
+        task_id,
+        actor,
+        command,
+        target_path: absoluteTarget,
+        stage: "forbidden_zone_blocked",
+        status: STEP_STATUSES.FAILED,
+        metadata: {
+          code: "SECURITY_VIOLATION"
+        }
+      });
+      throw new LocalSecurityGatewayError(
+        "SECURITY_VIOLATION",
+        `AI attempted to access a protected system path: ${absoluteTarget}`,
+        {
+          status: 403,
+          details: {
+            target_path: absoluteTarget
+          }
+        }
+      );
+    }
+
+    if (requireExisting && !fs.existsSync(absoluteTarget) && !normalizedCommand.includes("mkdir")) {
+      this.appendSecurityEvidence({
+        trace_id: traceId,
+        task_id,
+        actor,
+        command,
+        target_path: absoluteTarget,
+        stage: "physical_check_failed",
+        status: STEP_STATUSES.FAILED,
+        metadata: {
+          code: "PHYSICAL_CHECK_FAILED"
+        }
+      });
+      throw new LocalSecurityGatewayError(
+        "PHYSICAL_CHECK_FAILED",
+        `AI hallucinated that a path exists when it does not: ${absoluteTarget}`,
+        {
+          details: {
+            target_path: absoluteTarget
+          }
+        }
+      );
+    }
+
+    let reality;
+    try {
+      reality = assertPathReality(absoluteTarget, {
+        allowMissingLeaf,
+        requireDirectory,
+        requireFile,
+        operation: command
+      });
+    } catch (error) {
+      this.appendSecurityEvidence({
+        trace_id: traceId,
+        task_id,
+        actor,
+        command,
+        target_path: absoluteTarget,
+        stage: "physical_check_failed",
+        status: STEP_STATUSES.FAILED,
+        metadata: {
+          code: error.code || "PHYSICAL_CHECK_FAILED",
+          message: error.message
+        }
+      });
+      throw error;
+    }
+
+    const decision = this.authorizationWorkflow.policyStore.isPathAllowed(absoluteTarget, {
       workspaceRoot: this.workspaceRoot
     });
+    const isInsideWorkspace = normalizedTarget === this.workspaceRootComparison
+      || normalizedTarget.startsWith(`${this.workspaceRootComparison}${path.sep.toLowerCase()}`);
+    if (!isInsideWorkspace && !decision.allowed) {
+      await this.requestUserConsent({
+        trace_id: traceId,
+        task_id,
+        actor,
+        command,
+        absoluteTarget
+      });
+    }
+    if (decision.allowed && decision.rule && decision.rule.mode === "single") {
+      this.authorizationWorkflow.policyStore.consumeRule(decision.rule.rule_id);
+    }
+    return {
+      trace_id: traceId,
+      absolute_target: absoluteTarget,
+      normalized_target: normalizedTarget,
+      reality
+    };
   }
 
   resumeInterruptedWork() {
@@ -262,6 +609,116 @@ class LocalExecutor {
     });
   }
 
+  performPhysicalAction({
+    trace_id,
+    task_id,
+    actor = "local-runner",
+    command,
+    args = [],
+    cwd,
+    env = {},
+    network_isolation = true
+  }) {
+    const traceId = ensureTraceId(trace_id, "runner");
+    const sanitizedCommand = sanitizeCommandText(command, args);
+    return new Promise((resolve, reject) => {
+      const child = cp.execFile(command, args, {
+        cwd,
+        env: network_isolation ? sanitizeEnv({ ...process.env, ...env }) : { ...process.env, ...env },
+        timeout: 30000,
+        maxBuffer: 1024 * 1024,
+        windowsHide: true
+      }, (error, stdout, stderr) => {
+        guardian.stop();
+        const payload = {
+          trace_id: traceId,
+          task_id,
+          actor,
+          command: sanitizedCommand,
+          status: error ? "FAILED" : "COMPLETED",
+          exit_code: error && Number.isInteger(error.code) ? error.code : 0,
+          signal: error && error.signal ? error.signal : null,
+          stdout: scrubSensitiveData(String(stdout || "")),
+          stderr: scrubSensitiveData(String(stderr || "")),
+          network_isolation,
+          resource_limits: {
+            cpu_ratio: 0.3,
+            memory_mb: 1024,
+            timeout_ms: 30000,
+            max_buffer_bytes: 1024 * 1024
+          }
+        };
+        if (error) {
+          error.payload = payload;
+          reject(error);
+          return;
+        }
+        resolve(payload);
+      });
+      const guardian = this.resourceGuardian.watch(child, traceId);
+      child.on("error", (error) => {
+        guardian.stop();
+        reject(error);
+      });
+    });
+  }
+
+  async validateAndExecute({
+    trace_id,
+    task_id,
+    actor = "local-runner",
+    command,
+    args = [],
+    cwd = this.workspaceRoot,
+    env = {},
+    network_isolation = true
+  }) {
+    const traceId = ensureTraceId(trace_id, "runner");
+    const cwdValidation = await this.validatePathAccess({
+      trace_id: traceId,
+      task_id,
+      actor,
+      command: "execute",
+      targetPath: cwd,
+      requireDirectory: true,
+      requireExisting: true
+    });
+    if (network_isolation && isNetworkSensitiveCommand(command, args)) {
+      this.appendSecurityEvidence({
+        trace_id: traceId,
+        task_id,
+        actor,
+        command: sanitizeCommandText(command, args),
+        target_path: cwdValidation.absolute_target,
+        stage: "network_isolation_blocked",
+        status: STEP_STATUSES.FAILED,
+        metadata: {
+          code: "NETWORK_ISOLATION_BLOCKED"
+        }
+      });
+      throw new LocalSecurityGatewayError(
+        "NETWORK_ISOLATION_BLOCKED",
+        "Command is blocked by network isolation policy",
+        {
+          details: {
+            command: sanitizeCommandText(command, args),
+            target_path: cwdValidation.absolute_target
+          }
+        }
+      );
+    }
+    return this.performPhysicalAction({
+      trace_id: traceId,
+      task_id,
+      actor,
+      command,
+      args,
+      cwd: cwdValidation.absolute_target,
+      env,
+      network_isolation
+    });
+  }
+
   async writeFile({
     trace_id,
     task_id,
@@ -270,18 +727,16 @@ class LocalExecutor {
     content
   }) {
     const traceId = ensureTraceId(trace_id, "runner");
-    await this.assertAuthorizedPath({
+    const targetValidation = await this.validatePathAccess({
       trace_id: traceId,
       task_id,
       actor,
-      targetPath: target_path
+      command: "write",
+      targetPath: target_path,
+      allowMissingLeaf: true
     });
-    const targetReality = assertPathReality(target_path, {
-      allowMissingLeaf: true,
-      operation: "write file"
-    });
-    const targetFile = targetReality.normalized_path;
-    if (targetReality.exists && targetReality.stats && targetReality.stats.isDirectory()) {
+    const targetFile = targetValidation.absolute_target;
+    if (targetValidation.reality.exists && targetValidation.reality.stats && targetValidation.reality.stats.isDirectory()) {
       throw new ValidationError(`Cannot overwrite directory with file write: ${targetFile}`);
     }
     const snapshot = this.gitSafety.createSnapshot(traceId, "local-write-file");
@@ -333,17 +788,16 @@ class LocalExecutor {
     target_path
   }) {
     const traceId = ensureTraceId(trace_id, "runner");
-    await this.assertAuthorizedPath({
+    const targetValidation = await this.validatePathAccess({
       trace_id: traceId,
       task_id,
       actor,
-      targetPath: target_path
-    });
-    const targetReality = assertPathReality(target_path, {
+      command: "delete",
+      targetPath: target_path,
       requireFile: true,
-      operation: "delete file"
+      requireExisting: true
     });
-    const targetFile = targetReality.normalized_path;
+    const targetFile = targetValidation.absolute_target;
     const snapshot = this.gitSafety.createSnapshot(traceId, "local-delete-file");
     const checkpoint = this.stepJournal.beginStep({
       trace_id: traceId,
@@ -380,29 +834,26 @@ class LocalExecutor {
     destination_path
   }) {
     const traceId = ensureTraceId(trace_id, "runner");
-    await this.assertAuthorizedPath({
+    const sourceValidation = await this.validatePathAccess({
       trace_id: traceId,
       task_id,
       actor,
-      targetPath: source_path
-    });
-    await this.assertAuthorizedPath({
-      trace_id: traceId,
-      task_id,
-      actor,
-      targetPath: destination_path
-    });
-    const sourceReality = assertPathReality(source_path, {
+      command: "move_source",
+      targetPath: source_path,
       requireFile: true,
-      operation: "move source file"
+      requireExisting: true
     });
-    const destinationReality = assertPathReality(destination_path, {
-      allowMissingLeaf: true,
-      operation: "move destination file"
+    const destinationValidation = await this.validatePathAccess({
+      trace_id: traceId,
+      task_id,
+      actor,
+      command: "move_destination",
+      targetPath: destination_path,
+      allowMissingLeaf: true
     });
-    const sourceFile = sourceReality.normalized_path;
-    const destinationFile = destinationReality.normalized_path;
-    if (destinationReality.exists) {
+    const sourceFile = sourceValidation.absolute_target;
+    const destinationFile = destinationValidation.absolute_target;
+    if (destinationValidation.reality.exists) {
       throw new ValidationError(`Destination file already exists: ${destinationFile}`);
     }
     const snapshot = this.gitSafety.createSnapshot(traceId, "local-move-file");
@@ -453,78 +904,30 @@ class LocalExecutor {
     env = {},
     network_isolation = true
   }) {
-    const traceId = ensureTraceId(trace_id, "runner");
-    await this.assertAuthorizedPath({
-      trace_id: traceId,
+    return this.validateAndExecute({
+      trace_id,
       task_id,
       actor,
-      targetPath: cwd
-    });
-    const cwdReality = assertPathReality(cwd, {
-      requireDirectory: true,
-      operation: "exec cwd"
-    });
-    if (network_isolation && isNetworkSensitiveCommand(command, args)) {
-      throw new ValidationError("Command is blocked by network isolation policy");
-    }
-    const sanitizedCommand = sanitizeCommandText(command, args);
-    const child = cp.spawn(command, args, {
-      cwd: cwdReality.normalized_path,
-      env: network_isolation ? sanitizeEnv({ ...process.env, ...env }) : { ...process.env, ...env },
-      windowsHide: true
-    });
-    const guardian = this.resourceGuardian.watch(child, traceId);
-    const stdout = [];
-    const stderr = [];
-
-    return new Promise((resolve, reject) => {
-      child.stdout.on("data", (chunk) => {
-        stdout.push(chunk.toString("utf8"));
-      });
-      child.stderr.on("data", (chunk) => {
-        stderr.push(chunk.toString("utf8"));
-      });
-      child.on("error", (err) => {
-        guardian.stop();
-        reject(err);
-      });
-      child.on("close", (code, signal) => {
-        guardian.stop();
-        const payload = {
-          trace_id: traceId,
-          task_id,
-          actor,
-          command: sanitizedCommand,
-          status: code === 0 ? "COMPLETED" : "FAILED",
-          exit_code: code,
-          signal,
-          stdout: scrubSensitiveData(stdout.join("")),
-          stderr: scrubSensitiveData(stderr.join("")),
-          network_isolation,
-          resource_limits: {
-            cpu_ratio: 0.3,
-            memory_mb: 1024
-          }
-        };
-        if (code === 0) {
-          resolve(payload);
-          return;
-        }
-        const error = new Error(payload.stderr || `Command failed: ${sanitizedCommand}`);
-        error.payload = payload;
-        reject(error);
-      });
+      command,
+      args,
+      cwd,
+      env,
+      network_isolation
     });
   }
 }
 
 module.exports = {
   AuthorizationRequiredError,
+  FORBIDDEN_ZONES,
   FORBIDDEN_PATHS,
   LocalExecutor,
+  LocalSecurityGatewayError,
   ResourceGuardian,
   assertPathReality,
   assertForbiddenPath,
   isNetworkSensitiveCommand,
+  isWithinRoot,
+  normalizeComparisonPath,
   sampleProcessUsage
 };

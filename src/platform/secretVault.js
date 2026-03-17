@@ -7,16 +7,72 @@ const { resolveDataPath } = require("./appPaths");
 
 const DEFAULT_SECRET_VAULT_PATH = resolveDataPath("secret-vault.json");
 const DEFAULT_SECRET_AUDIT_PATH = resolveDataPath("secret-vault-audit.jsonl");
+const CURRENT_VAULT_VERSION = 2;
+const LEGACY_VAULT_VERSION = 1;
+const DEFAULT_KDF_CONFIG = Object.freeze({
+  algorithm: "pbkdf2-sha512",
+  digest: "sha512",
+  iterations: 210000,
+  key_length: 32,
+  salt_bytes: 32
+});
 
 function ensureDir(filePath) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
 }
 
-function hashKeyFingerprint(masterKey) {
-  return crypto.createHash("sha256").update(String(masterKey), "utf8").digest("hex");
+function createKdfConfig() {
+  return {
+    algorithm: DEFAULT_KDF_CONFIG.algorithm,
+    digest: DEFAULT_KDF_CONFIG.digest,
+    iterations: DEFAULT_KDF_CONFIG.iterations,
+    key_length: DEFAULT_KDF_CONFIG.key_length,
+    salt: crypto.randomBytes(DEFAULT_KDF_CONFIG.salt_bytes).toString("base64")
+  };
 }
 
-function deriveEncryptionKey(masterKey) {
+function normalizeKdfConfig(raw = {}) {
+  const salt = String(raw.salt || "").trim();
+  const iterations = Number(raw.iterations);
+  const keyLength = Number(raw.key_length);
+  const digest = String(raw.digest || DEFAULT_KDF_CONFIG.digest).trim() || DEFAULT_KDF_CONFIG.digest;
+  if (!salt) {
+    throw new ValidationError("Secret vault KDF salt is missing");
+  }
+  if (!Number.isInteger(iterations) || iterations < 100000) {
+    throw new ValidationError("Secret vault KDF iterations are invalid");
+  }
+  if (!Number.isInteger(keyLength) || keyLength < 32) {
+    throw new ValidationError("Secret vault KDF key length is invalid");
+  }
+  return {
+    algorithm: DEFAULT_KDF_CONFIG.algorithm,
+    digest,
+    iterations,
+    key_length: keyLength,
+    salt
+  };
+}
+
+function deriveEncryptionKey(masterKey, kdfConfig) {
+  const normalizedKdf = normalizeKdfConfig(kdfConfig);
+  return crypto.pbkdf2Sync(
+    String(masterKey),
+    Buffer.from(normalizedKdf.salt, "base64"),
+    normalizedKdf.iterations,
+    normalizedKdf.key_length,
+    normalizedKdf.digest
+  );
+}
+
+function hashKeyFingerprint(masterKey, kdfConfig) {
+  return crypto
+    .createHash("sha256")
+    .update(deriveEncryptionKey(masterKey, kdfConfig))
+    .digest("hex");
+}
+
+function legacyDeriveEncryptionKey(masterKey) {
   return crypto.createHash("sha256").update(String(masterKey), "utf8").digest();
 }
 
@@ -31,8 +87,8 @@ function maskSecretValue(secretValue) {
   return `${value.slice(0, 2)}***${value.slice(-2)}`;
 }
 
-function encryptSecret(secretValue, masterKey) {
-  const key = deriveEncryptionKey(masterKey);
+function encryptSecret(secretValue, masterKey, kdfConfig) {
+  const key = deriveEncryptionKey(masterKey, kdfConfig);
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
   let ciphertext = cipher.update(String(secretValue), "utf8", "base64");
@@ -45,8 +101,10 @@ function encryptSecret(secretValue, masterKey) {
   };
 }
 
-function decryptSecret(payload, masterKey) {
-  const key = deriveEncryptionKey(masterKey);
+function decryptSecret(payload, masterKey, kdfConfig = null) {
+  const key = kdfConfig
+    ? deriveEncryptionKey(masterKey, kdfConfig)
+    : legacyDeriveEncryptionKey(masterKey);
   const decipher = crypto.createDecipheriv("aes-256-gcm", key, Buffer.from(String(payload.iv || ""), "base64"));
   decipher.setAuthTag(Buffer.from(String(payload.tag || ""), "base64"));
   let plaintext = decipher.update(String(payload.ciphertext || ""), "base64", "utf8");
@@ -64,14 +122,46 @@ class JsonFileSecretVault {
     }
   }
 
+  createEmptyStore() {
+    const kdf = createKdfConfig();
+    return {
+      version: CURRENT_VAULT_VERSION,
+      kdf,
+      key_fingerprint: hashKeyFingerprint(this.masterKey, kdf),
+      updated_at: new Date().toISOString(),
+      entries: {}
+    };
+  }
+
+  maybeUpgradeLegacyStore(store) {
+    if (store.version >= CURRENT_VAULT_VERSION && store.kdf) {
+      return store;
+    }
+    const upgraded = this.createEmptyStore();
+    for (const [name, entry] of Object.entries(store.entries || {})) {
+      const plaintext = decryptSecret(entry, this.masterKey, null);
+      upgraded.entries[name] = {
+        ...encryptSecret(plaintext, this.masterKey, upgraded.kdf),
+        name,
+        created_at: entry.created_at || new Date().toISOString(),
+        updated_at: entry.updated_at || new Date().toISOString(),
+        metadata: entry.metadata || {}
+      };
+    }
+    upgraded.updated_at = new Date().toISOString();
+    this.saveStore(upgraded);
+    this.appendAudit("SECRET_VAULT_UPGRADED", {
+      actor: "system",
+      from_version: Number(store.version || LEGACY_VAULT_VERSION),
+      to_version: CURRENT_VAULT_VERSION,
+      secret_count: Object.keys(upgraded.entries).length
+    });
+    return upgraded;
+  }
+
   loadStore() {
     if (!fs.existsSync(this.filePath)) {
-      return {
-        version: 1,
-        key_fingerprint: hashKeyFingerprint(this.masterKey),
-        updated_at: new Date().toISOString(),
-        entries: {}
-      };
+      return this.createEmptyStore();
     }
     const raw = JSON.parse(fs.readFileSync(this.filePath, "utf8"));
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -80,6 +170,14 @@ class JsonFileSecretVault {
     if (!raw.entries || typeof raw.entries !== "object" || Array.isArray(raw.entries)) {
       raw.entries = {};
     }
+    if (!raw.version || Number(raw.version) < CURRENT_VAULT_VERSION || !raw.kdf) {
+      return this.maybeUpgradeLegacyStore({
+        ...raw,
+        version: Number(raw.version || LEGACY_VAULT_VERSION)
+      });
+    }
+    raw.kdf = normalizeKdfConfig(raw.kdf);
+    raw.key_fingerprint = String(raw.key_fingerprint || hashKeyFingerprint(this.masterKey, raw.kdf));
     return raw;
   }
 
@@ -109,7 +207,7 @@ class JsonFileSecretVault {
       throw new ValidationError("secret value is required");
     }
     const store = this.loadStore();
-    const encrypted = encryptSecret(value, this.masterKey);
+    const encrypted = encryptSecret(value, this.masterKey, store.kdf);
     const existing = store.entries[normalizedName] || {};
     store.entries[normalizedName] = {
       ...encrypted,
@@ -118,7 +216,8 @@ class JsonFileSecretVault {
       updated_at: new Date().toISOString(),
       metadata: options.metadata && typeof options.metadata === "object" ? options.metadata : {}
     };
-    store.key_fingerprint = hashKeyFingerprint(this.masterKey);
+    store.version = CURRENT_VAULT_VERSION;
+    store.key_fingerprint = hashKeyFingerprint(this.masterKey, store.kdf);
     store.updated_at = new Date().toISOString();
     this.saveStore(store);
     this.appendAudit("SECRET_UPSERTED", {
@@ -142,7 +241,7 @@ class JsonFileSecretVault {
     if (!entry) {
       return "";
     }
-    return decryptSecret(entry, this.masterKey);
+    return decryptSecret(entry, this.masterKey, store.kdf);
   }
 
   listSecretsMasked() {
@@ -151,7 +250,7 @@ class JsonFileSecretVault {
       .map(([name, entry]) => {
         let plaintext = "";
         try {
-          plaintext = decryptSecret(entry, this.masterKey);
+          plaintext = decryptSecret(entry, this.masterKey, store.kdf);
         } catch {
           plaintext = "";
         }
@@ -170,19 +269,22 @@ class JsonFileSecretVault {
       throw new ValidationError("new master key is required for rotation");
     }
     const store = this.loadStore();
+    const rotatedKdf = createKdfConfig();
     const rotated = {};
     for (const [name, entry] of Object.entries(store.entries)) {
-      const plaintext = decryptSecret(entry, this.masterKey);
+      const plaintext = decryptSecret(entry, this.masterKey, store.kdf);
       rotated[name] = {
-        ...encryptSecret(plaintext, targetKey),
+        ...encryptSecret(plaintext, targetKey, rotatedKdf),
         name,
         created_at: entry.created_at || new Date().toISOString(),
         updated_at: new Date().toISOString(),
         metadata: entry.metadata || {}
       };
     }
+    store.version = CURRENT_VAULT_VERSION;
+    store.kdf = rotatedKdf;
     store.entries = rotated;
-    store.key_fingerprint = hashKeyFingerprint(targetKey);
+    store.key_fingerprint = hashKeyFingerprint(targetKey, rotatedKdf);
     store.updated_at = new Date().toISOString();
     this.saveStore(store);
     this.appendAudit("SECRET_KEY_ROTATED", {
@@ -198,10 +300,14 @@ class JsonFileSecretVault {
 }
 
 module.exports = {
+  CURRENT_VAULT_VERSION,
+  DEFAULT_KDF_CONFIG,
   DEFAULT_SECRET_AUDIT_PATH,
   DEFAULT_SECRET_VAULT_PATH,
   JsonFileSecretVault,
   decryptSecret,
+  deriveEncryptionKey,
   encryptSecret,
+  hashKeyFingerprint,
   maskSecretValue
 };

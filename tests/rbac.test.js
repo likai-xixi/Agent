@@ -104,8 +104,8 @@ test("authorizeRequest enforces route-level role policy", () => {
   assert.equal(deniedWrite.reason, "ROLE_FORBIDDEN");
 });
 
-test("authorizeRequest falls back to default_roles when identity is missing", () => {
-  const allowed = authorizeRequest({
+test("authorizeRequest denies when identity is missing", () => {
+  const denied = authorizeRequest({
     method: "POST",
     pathname: "/tasks",
     identity: null,
@@ -114,7 +114,8 @@ test("authorizeRequest falls back to default_roles when identity is missing", ()
       default_roles: [RBAC_ROLES.TASK_ADMIN]
     }
   });
-  assert.equal(allowed.allowed, true);
+  assert.equal(denied.allowed, false);
+  assert.equal(denied.reason, "ROLE_MISSING");
 });
 
 test("task API RBAC allows auditor read but denies write", async () => {
@@ -150,6 +151,21 @@ test("task API RBAC allows auditor read but denies write", async () => {
   } finally {
     await app.stop();
   }
+});
+
+test("authorizeRequest locks down when RBAC is disabled", () => {
+  const denied = authorizeRequest({
+    method: "GET",
+    pathname: "/health",
+    identity: {
+      roles: [RBAC_ROLES.SUPER_ADMIN]
+    },
+    config: {
+      rbac_enabled: false
+    }
+  });
+  assert.equal(denied.allowed, false);
+  assert.equal(denied.reason, "RBAC_LOCKDOWN");
 });
 
 test("task API RBAC allows task_admin task writes and denies discovery run", async () => {
