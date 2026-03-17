@@ -5,6 +5,8 @@ const { randomUUID } = require("crypto");
 const { URL } = require("url");
 
 const { TaskOrchestrator } = require("../orchestrator/orchestratorService");
+const { BudgetExceededError } = require("../orchestrator/executionGovernor");
+const { ImCommandBridge } = require("../integrations/imCommandBridge");
 const {
   API_AUTH_ACCEPTED,
   API_AUTH_REJECTED,
@@ -12,7 +14,9 @@ const {
   API_AUTHZ_DENIED,
   createAuditEvent
 } = require("../platform/audit");
+const { AuthorizationRequiredError, AuthorizationWorkflowManager } = require("../platform/authorizationWorkflow");
 const { ValidationError } = require("../platform/contracts");
+const { LocalExecutor } = require("../platform/localExecutor");
 const { ProviderExecutionError } = require("../providers/adapterContract");
 const { TASK_STATES } = require("../orchestrator/taskStateMachine");
 const { fromMapping, loadFeatureFlags } = require("../platform/featureFlags");
@@ -25,18 +29,22 @@ const {
   SqliteTakeoverStore,
   SqliteTaskSnapshotStore
 } = require("../persistence/sqliteRuntimeStore");
+const { createImNotifierFromEnv } = require("../takeover/imNotifier");
 const {
   AuthError,
   authenticateIncomingRequest,
   loadApiAuthConfig,
   normalizeApiAuthConfig
 } = require("./auth");
+const { SelfHealingSupervisor } = require("../monitoring/selfHealingSupervisor");
 const {
   RBAC_ROLES,
   authorizeRequest,
   loadRbacConfig,
   normalizeRbacConfig
 } = require("./rbac");
+const { SkillRegistry } = require("../platform/skillsRegistry");
+const { McpRegistry } = require("../platform/mcpRegistry");
 
 function jsonResponse(res, statusCode, payload) {
   const body = JSON.stringify(payload);
@@ -118,6 +126,9 @@ function normalizeProviderProfiles(raw = {}, fallback = {}) {
     const latencyHint = Number(profile.latency_weight_hint);
     result[provider] = {
       default_model: String(profile.default_model || previous.default_model || `${provider}-default-model`),
+      flash_model: String(profile.flash_model || previous.flash_model || profile.default_model || previous.default_model || `${provider}-flash-model`),
+      pro_model: String(profile.pro_model || previous.pro_model || profile.default_model || previous.default_model || `${provider}-pro-model`),
+      committee_model: String(profile.committee_model || previous.committee_model || profile.default_model || previous.default_model || `${provider}-committee-model`),
       cost_per_1k_tokens: Number.isFinite(cost) && cost > 0 ? cost : Number(previous.cost_per_1k_tokens || 0.02),
       latency_weight_hint: Number.isFinite(latencyHint) ? latencyHint : Number(previous.latency_weight_hint || 0.6),
       models_by_task_type: modelsByTaskType
@@ -270,6 +281,25 @@ function createTaskApiServer(options = {}) {
   const secretVaultConfigPath = options.secretVaultConfigPath || "config/secret_vault.json";
   const runtimeDbConfigPath = options.runtimeDbConfigPath || "config/runtime_db.json";
   const runtimeDbConfig = loadRuntimeDbConfig(runtimeDbConfigPath);
+  const sharedImNotifier = options.imNotifier || createImNotifierFromEnv(options.imNotifierOptions || {});
+  const authorizationWorkflow = options.authorizationWorkflow || new AuthorizationWorkflowManager({
+    notifier: sharedImNotifier
+  });
+  const localExecutor = options.localExecutor || new LocalExecutor({
+    workspaceRoot: options.workspaceRoot || process.cwd(),
+    authorizationWorkflow,
+    notifier: sharedImNotifier,
+    gitSafetyEnabled: options.gitSafetyEnabled !== false
+  });
+  const imCommandBridge = options.imCommandBridge || new ImCommandBridge({
+    authorizationWorkflow,
+    localExecutor,
+    notifier: sharedImNotifier,
+    signatureSecret: options.imBridgeSecret || process.env.IM_BRIDGE_SECRET || "",
+    signatureHeader: options.imBridgeSignatureHeader || process.env.IM_BRIDGE_SIGNATURE_HEADER || "x-im-signature",
+    signatureAlgorithm: options.imBridgeSignatureAlgorithm || process.env.IM_BRIDGE_SIGNATURE_ALGO || "sha256",
+    signaturePrefix: options.imBridgeSignaturePrefix || process.env.IM_BRIDGE_SIGNATURE_PREFIX || "sha256="
+  });
   const hasProvidedOrchestrator = Boolean(options.orchestrator);
   const hasExplicitFlagConfig = Object.prototype.hasOwnProperty.call(options, "flags")
     || Object.prototype.hasOwnProperty.call(options, "featureFlagPath");
@@ -289,6 +319,8 @@ function createTaskApiServer(options = {}) {
       });
       orchestrator = new TaskOrchestrator({
         flags: initialFlags,
+        imNotifier: sharedImNotifier,
+        authorizationWorkflow,
         eventStore: new SqliteAuditEventStore({
           database: managedRuntimeDatabase
         }),
@@ -306,6 +338,8 @@ function createTaskApiServer(options = {}) {
     } else {
       orchestrator = new TaskOrchestrator({
         flags: initialFlags,
+        imNotifier: sharedImNotifier,
+        authorizationWorkflow,
         takeoverStorePath: options.takeoverStorePath,
         auditMaintenanceHistoryPath: options.auditMaintenanceHistoryPath
       });
@@ -340,7 +374,21 @@ function createTaskApiServer(options = {}) {
   const secretVaultMasterKey = String(options.secretVaultMasterKey || process.env[secretVaultConfig.master_key_env] || "");
   const host = options.host ?? "127.0.0.1";
   const port = options.port ?? 3000;
+  const skillRegistry = options.skillRegistry || new SkillRegistry({
+    authorizationWorkflow
+  });
+  const mcpRegistry = options.mcpRegistry || new McpRegistry({
+    authorizationWorkflow
+  });
   const adminUiRoot = options.adminUiRoot || path.join(__dirname, "admin-ui");
+  const selfHealingSupervisor = options.selfHealingSupervisor || new SelfHealingSupervisor({
+    handoffSnapshotStore: orchestrator.executionGovernor
+      ? orchestrator.executionGovernor.handoffSnapshotStore
+      : null
+  });
+  const autoResumeResult = options.autoResumeInterrupted === false
+    ? []
+    : localExecutor.resumeInterruptedWork();
   const adminAssets = {
     "/admin/styles.css": {
       file: "styles.css",
@@ -414,6 +462,32 @@ function createTaskApiServer(options = {}) {
       reason: "",
       secrets
     };
+  }
+
+  function collectBackupFiles() {
+    const files = [];
+    if (orchestrator.eventStore && orchestrator.eventStore.filePath) {
+      files.push(orchestrator.eventStore.filePath);
+    }
+    if (authorizationWorkflow.requestStore && authorizationWorkflow.requestStore.filePath) {
+      files.push(authorizationWorkflow.requestStore.filePath);
+    }
+    if (authorizationWorkflow.policyStore && authorizationWorkflow.policyStore.filePath) {
+      files.push(authorizationWorkflow.policyStore.filePath);
+    }
+    if (localExecutor.stepJournal && localExecutor.stepJournal.filePath) {
+      files.push(localExecutor.stepJournal.filePath);
+    }
+    if (skillRegistry.proposalFile) {
+      files.push(skillRegistry.proposalFile);
+    }
+    if (skillRegistry.registryFile) {
+      files.push(skillRegistry.registryFile);
+    }
+    if (mcpRegistry.registryFile) {
+      files.push(mcpRegistry.registryFile);
+    }
+    return files.filter(Boolean);
   }
 
   const server = http.createServer(async (req, res) => {
@@ -494,6 +568,9 @@ function createTaskApiServer(options = {}) {
           provider_health: providerHealth,
           pending_takeovers: orchestrator.getPendingTakeovers().length,
           active_alerts: openAlerts.length,
+          pending_authorizations: orchestrator.listAuthorizationRequests("PENDING").length,
+          interrupted_local_steps: localExecutor.stepJournal.listInterrupted().length,
+          startup_resume_result: autoResumeResult,
           adaptive_routing_enabled: orchestrator.flags.adaptive_routing_enabled === true,
           discussion_engine_enabled: orchestrator.flags.discussion_engine_enabled === true,
           auth_enabled: authConfig.auth_enabled === true,
@@ -666,6 +743,26 @@ function createTaskApiServer(options = {}) {
           actor,
           source: requestSource
         });
+        selfHealingSupervisor.register(task.task_id, () => {
+          if (orchestrator.getTask(task.task_id)) {
+            try {
+              orchestrator.transitionTask({
+                task_id: task.task_id,
+                to_state: TASK_STATES.WAITING_HUMAN,
+                actor: "self-heal",
+                source: "self-heal",
+                reason: "heartbeat_timeout",
+                error_message: "Task heartbeat timed out and requires recovery."
+              });
+            } catch {
+              // no-op: self-heal must never crash the API
+            }
+          }
+        }, {
+          trace_id: task.trace_id,
+          task_id: task.task_id,
+          task_type: task.task_type
+        });
         jsonResponse(res, 201, {
           task
         });
@@ -680,6 +777,11 @@ function createTaskApiServer(options = {}) {
           notFound(res, `Task not found: ${taskId}`);
           return;
         }
+        selfHealingSupervisor.beat(taskId, {
+          trace_id: task.trace_id,
+          task_id: task.task_id,
+          task_type: task.task_type
+        });
         jsonResponse(res, 200, { task });
         return;
       }
@@ -737,6 +839,7 @@ function createTaskApiServer(options = {}) {
           task_id: taskId,
           prompt: body.prompt || "",
           participants: body.participants || [],
+          participant_profiles: isRecord(body.participant_profiles) ? body.participant_profiles : {},
           quorum: Number.isInteger(body.quorum) ? body.quorum : 2,
           actor,
           source: requestSource
@@ -786,6 +889,11 @@ function createTaskApiServer(options = {}) {
             metadata: actionMetadata
           });
         }
+        selfHealingSupervisor.beat(taskId, {
+          trace_id: currentTask.trace_id,
+          task_id: currentTask.task_id,
+          task_type: currentTask.task_type
+        });
 
         if (body.input) {
           try {
@@ -960,8 +1068,208 @@ function createTaskApiServer(options = {}) {
         return;
       }
 
+      if (method === "POST" && pathname === "/ops/self-heal/sweep") {
+        const results = selfHealingSupervisor.sweep();
+        jsonResponse(res, 200, {
+          count: results.length,
+          results
+        });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/ops/backups/run") {
+        const backup = selfHealingSupervisor.backupFiles(collectBackupFiles());
+        jsonResponse(res, 200, {
+          backup
+        });
+        return;
+      }
+
+      if (method === "GET" && pathname === "/runner/authorizations/pending") {
+        const requests = orchestrator.listAuthorizationRequests("PENDING");
+        jsonResponse(res, 200, {
+          count: requests.length,
+          requests
+        });
+        return;
+      }
+
+      if (method === "GET" && pathname === "/skills/proposals") {
+        const status = requestUrl.searchParams.get("status") || "";
+        const proposals = skillRegistry.listProposals(status);
+        jsonResponse(res, 200, {
+          count: proposals.length,
+          proposals
+        });
+        return;
+      }
+
+      if (method === "GET" && pathname === "/skills/installed") {
+        const skills = skillRegistry.listInstalled();
+        jsonResponse(res, 200, {
+          count: skills.length,
+          skills
+        });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/skills/proposals") {
+        const body = await parseJsonBody(req);
+        const actor = resolveRequestActor(body.actor, requestIdentity, "agent", forceIdentityActor);
+        const proposal = await skillRegistry.submitProposal({
+          trace_id: body.trace_id || randomUUID(),
+          actor,
+          name: body.name,
+          code: body.code,
+          level: body.level || 1,
+          language: body.language || "python"
+        });
+        jsonResponse(res, 201, {
+          proposal
+        });
+        return;
+      }
+
+      const skillProposalReviewMatch = pathname.match(/^\/skills\/proposals\/([^/]+)\/review$/);
+      if (method === "POST" && skillProposalReviewMatch) {
+        const proposalId = decodeURIComponent(skillProposalReviewMatch[1]);
+        const body = await parseJsonBody(req);
+        const actor = resolveRequestActor(body.actor, requestIdentity, "operator", forceIdentityActor);
+        const proposal = skillRegistry.resolveProposal({
+          proposal_id: proposalId,
+          action: body.action,
+          actor,
+          note: body.note || ""
+        });
+        jsonResponse(res, 200, {
+          proposal
+        });
+        return;
+      }
+
+      if (method === "GET" && pathname === "/mcp/mounts") {
+        const mounts = mcpRegistry.listMounts();
+        jsonResponse(res, 200, {
+          count: mounts.length,
+          mounts
+        });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/mcp/mounts") {
+        const body = await parseJsonBody(req);
+        const actor = resolveRequestActor(body.actor, requestIdentity, "operator", forceIdentityActor);
+        const mount = await mcpRegistry.mountServer({
+          trace_id: body.trace_id || randomUUID(),
+          actor,
+          name: body.name,
+          command: body.command,
+          args: Array.isArray(body.args) ? body.args : [],
+          cwd: body.cwd || process.cwd(),
+          approved: body.approved === true
+        });
+        jsonResponse(res, 201, {
+          mount
+        });
+        return;
+      }
+
+      const authResolveMatch = pathname.match(/^\/runner\/authorizations\/([^/]+)\/resolve$/);
+      if (method === "POST" && authResolveMatch) {
+        const requestId = decodeURIComponent(authResolveMatch[1]);
+        const body = await parseJsonBody(req);
+        const actor = resolveRequestActor(body.actor, requestIdentity, "operator", forceIdentityActor);
+        const resolved = orchestrator.resolveAuthorizationRequest({
+          request_id: requestId,
+          action: body.action,
+          actor,
+          note: body.note || "",
+          mode: body.mode || ""
+        });
+        jsonResponse(res, 200, {
+          authorization: resolved
+        });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/runner/execute") {
+        const body = await parseJsonBody(req);
+        const actor = resolveRequestActor(body.actor, requestIdentity, "local-runner", forceIdentityActor);
+        let result;
+        if (body.operation === "WRITE_FILE") {
+          result = await localExecutor.writeFile({
+            trace_id: body.trace_id || randomUUID(),
+            task_id: body.task_id || `runner-${randomUUID()}`,
+            actor,
+            target_path: body.target_path,
+            content: body.content || ""
+          });
+        } else if (body.operation === "DELETE_FILE") {
+          result = await localExecutor.deleteFile({
+            trace_id: body.trace_id || randomUUID(),
+            task_id: body.task_id || `runner-${randomUUID()}`,
+            actor,
+            target_path: body.target_path
+          });
+        } else if (body.operation === "MOVE_FILE") {
+          result = await localExecutor.moveFile({
+            trace_id: body.trace_id || randomUUID(),
+            task_id: body.task_id || `runner-${randomUUID()}`,
+            actor,
+            source_path: body.source_path,
+            destination_path: body.destination_path
+          });
+        } else {
+          result = await localExecutor.execCommand({
+            trace_id: body.trace_id || randomUUID(),
+            task_id: body.task_id || `runner-${randomUUID()}`,
+            actor,
+            command: body.command,
+            args: Array.isArray(body.args) ? body.args : [],
+            cwd: body.cwd || localExecutor.workspaceRoot,
+            network_isolation: body.network_isolation !== false
+          });
+        }
+        jsonResponse(res, 200, {
+          execution: result
+        });
+        return;
+      }
+
+      const mailboxMatch = pathname.match(/^\/discussion\/mailboxes\/([^/]+)$/);
+      if (method === "GET" && mailboxMatch) {
+        const agent = decodeURIComponent(mailboxMatch[1]);
+        const records = orchestrator.getMailbox(agent);
+        jsonResponse(res, 200, {
+          agent,
+          count: records.length,
+          records
+        });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/integrations/im/commands") {
+        const body = await parseJsonBody(req);
+        const result = await imCommandBridge.handleIncoming({
+          payload: body,
+          headers: req.headers || {},
+          orchestrator
+        });
+        jsonResponse(res, 200, result);
+        return;
+      }
+
       if (method === "POST" && pathname === "/integrations/im/events") {
         const body = await parseJsonBody(req);
+        if (body.command || body.request_id || body.text) {
+          const result = await imCommandBridge.handleIncoming({
+            payload: body,
+            headers: req.headers || {},
+            orchestrator
+          });
+          jsonResponse(res, 200, result);
+          return;
+        }
         if (!body.task_id || !body.action) {
           badRequest(res, "task_id and action are required");
           return;
@@ -1001,6 +1309,23 @@ function createTaskApiServer(options = {}) {
           error: err.code || "PROVIDER_EXECUTION_ERROR",
           message: err.message,
           takeover: err.takeover || null
+        });
+        return;
+      }
+      if (err instanceof AuthorizationRequiredError) {
+        jsonResponse(res, err.status || 202, {
+          error: err.code || "AUTHORIZATION_REQUIRED",
+          message: err.message,
+          authorization: err.request || null,
+          task: err.failed_task || null
+        });
+        return;
+      }
+      if (err instanceof BudgetExceededError) {
+        jsonResponse(res, err.status || 429, {
+          error: err.code || "DAILY_BUDGET_EXCEEDED",
+          message: err.message,
+          details: err.details || {}
         });
         return;
       }
@@ -1049,6 +1374,8 @@ function createTaskApiServer(options = {}) {
 
   return {
     orchestrator,
+    localExecutor,
+    imCommandBridge,
     server,
     start,
     stop

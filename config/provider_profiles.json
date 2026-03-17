@@ -1,23 +1,34 @@
 {
   "openai": {
     "default_model": "gpt-4.1",
+    "flash_model": "gpt-4.1-mini",
+    "pro_model": "gpt-4.1",
+    "committee_model": "gpt-4.1",
     "cost_per_1k_tokens": 0.02,
     "latency_weight_hint": 0.6
   },
   "gemini": {
     "default_model": "gemini-2.0-flash",
+    "flash_model": "gemini-2.0-flash",
+    "pro_model": "gemini-2.0-pro",
+    "committee_model": "gemini-2.0-pro",
     "cost_per_1k_tokens": 0.012,
     "latency_weight_hint": 0.7
   },
   "claude": {
     "default_model": "claude-3-7-sonnet",
+    "flash_model": "claude-3-5-haiku",
+    "pro_model": "claude-3-7-sonnet",
+    "committee_model": "claude-3-7-sonnet",
     "cost_per_1k_tokens": 0.018,
     "latency_weight_hint": 0.65
   },
   "local": {
     "default_model": "local-llm-default",
+    "flash_model": "local-llm-default",
+    "pro_model": "local-llm-default",
+    "committee_model": "local-llm-default",
     "cost_per_1k_tokens": 0.002,
     "latency_weight_hint": 0.5
   }
 }
-

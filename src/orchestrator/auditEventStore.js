@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const { resolveDataPath } = require("../platform/appPaths");
 
 function computeEventHash(event, previousHash) {
   const body = JSON.stringify({
@@ -12,7 +13,7 @@ function computeEventHash(event, previousHash) {
 
 class JsonlAuditEventStore {
   constructor(options = {}) {
-    const filePath = options.filePath || path.join("data", "audit-events.jsonl");
+    const filePath = options.filePath || resolveDataPath("audit-events.jsonl");
     this.filePath = filePath;
     this.ensureStorePath();
   }

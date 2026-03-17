@@ -5,6 +5,12 @@ const DEFAULT_FLAGS = Object.freeze({
   takeover_engine_enabled: false,
   discussion_engine_enabled: false,
   adaptive_routing_enabled: false,
+  shadow_execution_enabled: false,
+  im_bridge_enabled: true,
+  local_runner_enabled: true,
+  self_healing_enabled: true,
+  knowledge_transfer_enabled: true,
+  tools_as_code_enabled: true,
   openai_adapter_enabled: false,
   gemini_adapter_enabled: false,
   claude_adapter_enabled: false,
@@ -29,6 +35,7 @@ function highRiskFlagsDisabled(flags) {
     flags.takeover_engine_enabled ||
     flags.discussion_engine_enabled ||
     flags.adaptive_routing_enabled ||
+    flags.shadow_execution_enabled ||
     flags.openai_adapter_enabled ||
     flags.gemini_adapter_enabled ||
     flags.claude_adapter_enabled

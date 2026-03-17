@@ -1,0 +1,5 @@
+{
+  "guardrails": [
+    "Capture resumable state before risky mutations and re-validate reality before retrying."
+  ]
+}

@@ -40,3 +40,4 @@
 24. [x] Add role/model/provider configuration UI and settings APIs.
 25. [x] Move core runtime persistence to structured SQLite database adapters.
 26. [x] Production readiness closeout with final regression, rollback rehearsal, and release decision pack.
+27. [x] Add local closed-loop governance plane with secure runner, IM bridge, interrupted-step resume, portable data root, skills, and self-heal controls.

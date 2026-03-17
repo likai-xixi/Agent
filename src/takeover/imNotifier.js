@@ -29,6 +29,30 @@ class InMemoryImNotifier {
     return notification;
   }
 
+  async sendAuthorizationRequired(payload) {
+    const notification = {
+      notification_id: randomUUID(),
+      channel: this.channel,
+      status: "SENT",
+      payload,
+      sent_at: new Date().toISOString()
+    };
+    this.notifications.push(notification);
+    return notification;
+  }
+
+  async sendStatusUpdate(payload) {
+    const notification = {
+      notification_id: randomUUID(),
+      channel: this.channel,
+      status: "SENT",
+      payload,
+      sent_at: new Date().toISOString()
+    };
+    this.notifications.push(notification);
+    return notification;
+  }
+
   getAllNotifications() {
     return [...this.notifications];
   }
@@ -40,6 +64,29 @@ function createTakeoverLines(payload = {}) {
     `trace_id: ${payload.trace_id || "UNKNOWN"}`,
     `reason: ${payload.reason || "MANUAL_INTERVENTION_REQUIRED"}`,
     `actions: ${Array.isArray(payload.actions) ? payload.actions.join(", ") : ""}`
+  ];
+}
+
+function createAuthorizationLines(payload = {}) {
+  const resource = payload.resource && typeof payload.resource === "object"
+    ? JSON.stringify(payload.resource)
+    : String(payload.resource || "UNKNOWN");
+  return [
+    `request_id: ${payload.request_id || "UNKNOWN"}`,
+    `trace_id: ${payload.trace_id || "UNKNOWN"}`,
+    `task_id: ${payload.task_id || "UNKNOWN"}`,
+    `request_type: ${payload.request_type || "AUTHORIZATION"}`,
+    `resource: ${resource}`,
+    `grant_modes: ${Array.isArray(payload.options && payload.options.grant_modes) ? payload.options.grant_modes.join(", ") : ""}`
+  ];
+}
+
+function createStatusLines(payload = {}) {
+  return [
+    `trace_id: ${payload.trace_id || "UNKNOWN"}`,
+    `task_id: ${payload.task_id || "UNKNOWN"}`,
+    `status: ${payload.status || "UNKNOWN"}`,
+    `summary: ${payload.summary || ""}`
   ];
 }
 
@@ -85,6 +132,79 @@ class WebhookImNotifier {
       adapter: this.adapter,
       title,
       lines: createTakeoverLines(payload)
+    });
+    try {
+      const response = await this.dispatcher({
+        url: this.url,
+        payload: webhookPayload,
+        headers: this.headers,
+        timeoutMs: this.timeoutMs,
+        retries: this.retries,
+        backoffMs: this.backoffMs,
+        signatureSecret: this.signatureSecret,
+        signatureHeader: this.signatureHeader,
+        signatureAlgorithm: this.signatureAlgorithm,
+        signaturePrefix: this.signaturePrefix
+      });
+      const notification = {
+        ...base,
+        status: response.ok ? "SENT" : "FAILED",
+        attempts: response.attempts,
+        status_code: response.status_code,
+        response_body: response.response_body
+      };
+      this.notifications.push(notification);
+      return notification;
+    } catch (err) {
+      const failed = {
+        ...base,
+        status: "FAILED",
+        error_message: err && err.message ? err.message : "WEBHOOK_DISPATCH_FAILED"
+      };
+      this.notifications.push(failed);
+      return failed;
+    }
+  }
+
+  async sendAuthorizationRequired(payload = {}) {
+    return this.sendStructuredMessage({
+      payload,
+      title: `[Authorization Required] ${payload.request_type || "AUTHORIZATION"}`,
+      lines: createAuthorizationLines(payload)
+    });
+  }
+
+  async sendStatusUpdate(payload = {}) {
+    return this.sendStructuredMessage({
+      payload,
+      title: `[Agent Status] ${payload.status || "UNKNOWN"}`,
+      lines: createStatusLines(payload)
+    });
+  }
+
+  async sendStructuredMessage({ payload, title, lines }) {
+    const now = new Date().toISOString();
+    const notificationId = randomUUID();
+    const base = {
+      notification_id: notificationId,
+      channel: this.channel,
+      status: "SENT",
+      payload,
+      sent_at: now
+    };
+    if (!this.url) {
+      const skipped = {
+        ...base,
+        status: "SKIPPED",
+        error_message: "WEBHOOK_URL_NOT_CONFIGURED"
+      };
+      this.notifications.push(skipped);
+      return skipped;
+    }
+    const webhookPayload = buildMarkdownWebhookPayload({
+      adapter: this.adapter,
+      title,
+      lines
     });
     try {
       const response = await this.dispatcher({

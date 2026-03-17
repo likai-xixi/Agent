@@ -3,9 +3,10 @@ const fs = require("fs");
 const path = require("path");
 
 const { ValidationError } = require("./contracts");
+const { resolveDataPath } = require("./appPaths");
 
-const DEFAULT_SECRET_VAULT_PATH = path.join("data", "secret-vault.json");
-const DEFAULT_SECRET_AUDIT_PATH = path.join("data", "secret-vault-audit.jsonl");
+const DEFAULT_SECRET_VAULT_PATH = resolveDataPath("secret-vault.json");
+const DEFAULT_SECRET_AUDIT_PATH = resolveDataPath("secret-vault-audit.jsonl");
 
 function ensureDir(filePath) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });

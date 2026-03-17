@@ -75,6 +75,13 @@ This repository enforces one hard rule for development:
 17. Migrate and enable structured runtime database persistence (optional, recommended for restart durability):
    - `npm run db:migrate:up`
    - set `config/runtime_db.json` to `{ "enabled": true, "db_path": "data/runtime-state.db" }`
+18. Configure portable user-data root (optional, recommended for cross-machine migration):
+   - set `AGENT_DATA_DIR` to an external directory
+   - user data such as `steps.jsonl`, `audit-events.jsonl`, authorization policies, cache, skills, and MCP mount records will follow this root
+19. Use the local closed-loop runner for sensitive filesystem or command tasks:
+   - `POST /runner/execute`
+   - forbidden paths are blocked locally before any mutation or process spawn
+   - non-workspace paths suspend behind an authorization request instead of guessing intent
 
 ## Run Task API
 
@@ -100,7 +107,18 @@ API endpoints:
 - `POST /tasks/{id}/discussion`
 - `GET /tasks/{id}/discussion/latest`
 - `GET /takeovers/pending`
+- `GET /runner/authorizations/pending`
+- `POST /runner/authorizations/{request_id}/resolve`
+- `POST /runner/execute`
 - `POST /integrations/im/events`
+- `POST /integrations/im/commands`
+- `GET /discussion/mailboxes/{agent}`
+- `GET /skills/proposals`
+- `POST /skills/proposals`
+- `POST /skills/proposals/{proposal_id}/review`
+- `GET /skills/installed`
+- `GET /mcp/mounts`
+- `POST /mcp/mounts`
 - `GET /routing/preview`
 - `POST /ops/discovery/run`
 - `GET /ops/discovery/latest`
@@ -109,6 +127,8 @@ API endpoints:
 - `GET /ops/audit-maintenance/latest`
 - `GET /ops/audit-maintenance/runs`
 - `GET /ops/audit-maintenance/failures`
+- `POST /ops/self-heal/sweep`
+- `POST /ops/backups/run`
 - `GET /health`
 
 Admin UI:
@@ -134,7 +154,14 @@ Admin UI:
 - `config/rbac_policy.json`: endpoint-level RBAC policy switch and defaults
 - `config/secret_vault.json`: secret vault file/audit path and key env reference
 - `config/runtime_db.json`: structured runtime DB toggle and DB file path
+- `config/system_guardrails.json`: self-reflection generated guardrail updates
 - `src/persistence/sqliteRuntimeStore.js`: SQLite persistence adapters (task/audit/takeover/alert)
+- `src/platform/localExecutor.js`: local closed-loop runner with forbidden path, authorization, resume, and circuit breaker controls
+- `src/platform/checkpointJournal.js`: resumable `steps.jsonl` journal for interrupted local work
+- `src/integrations/imCommandBridge.js`: inbound IM command bridge for local webhook control
+- `src/platform/skillsRegistry.js`: tools-as-code proposal, scan, and installation flow
+- `src/platform/mcpRegistry.js`: npx-based MCP dynamic mount registry
+- `src/monitoring/selfHealingSupervisor.js`: heartbeat sweep and portable backup helper
 
 ## Default Risk Control
 
@@ -148,10 +175,25 @@ Flags include:
 - `takeover_engine_enabled`
 - `discussion_engine_enabled`
 - `adaptive_routing_enabled`
+- `shadow_execution_enabled`
+- `im_bridge_enabled`
+- `local_runner_enabled`
+- `self_healing_enabled`
+- `knowledge_transfer_enabled`
+- `tools_as_code_enabled`
 - `openai_adapter_enabled`
 - `gemini_adapter_enabled`
 - `claude_adapter_enabled`
 - `local_model_adapter_enabled`
+
+## Local Control Plane
+
+This project now treats the local Node.js runtime as the trust boundary.
+
+- Sensitive prompt scrubbing, authorization, path interception, cache, audit, and handoff snapshots stay local.
+- User data is decoupled from business code and can be relocated with `AGENT_DATA_DIR`.
+- Interrupted non-idempotent local steps are journaled in `steps.jsonl` and can be resumed on startup.
+- External IM systems should call the local webhook endpoint, and the local bridge routes commands to task control, private agent mailboxes, or authorization workflows.
 
 ## CI Gate
 

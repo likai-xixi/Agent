@@ -16,6 +16,7 @@ const {
 const { HealthAlarmStore } = require("./healthAlarmStore");
 const { InMemoryOpsNotifier, WebhookOpsNotifier, createOpsNotifierFromEnv } = require("./opsNotifier");
 const { ProviderDiscoveryService } = require("./providerDiscovery");
+const { SelfHealingSupervisor } = require("./selfHealingSupervisor");
 
 module.exports = {
   DEFAULT_ESCALATION_POLICY,
@@ -32,6 +33,7 @@ module.exports = {
   loadEscalationPolicy,
   markAlertSent,
   ProviderDiscoveryService,
+  SelfHealingSupervisor,
   resolveSeverity,
   shouldSuppressAlert
 };

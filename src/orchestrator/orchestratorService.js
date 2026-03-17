@@ -1,8 +1,16 @@
 const {
+  AUTHORIZATION_RESOLVED,
   DISCUSSION_COMPLETED,
   DISCUSSION_DECISION_RECORDED,
   DISCUSSION_STARTED,
   FALLBACK_TRIGGERED,
+  GOVERNANCE_AUTH_REQUESTED,
+  GOVERNANCE_BUDGET_BLOCKED,
+  GOVERNANCE_CACHE_HIT,
+  GOVERNANCE_CONTEXT_COMPRESSED,
+  HANDOFF_SNAPSHOT_CREATED,
+  SHADOW_EXECUTION_COMPLETED,
+  SHADOW_EXECUTION_FAILED,
   PROVIDER_EXECUTION_COMPLETED,
   PROVIDER_DISCOVERY_RUN,
   PROVIDER_EXECUTION_FAILED,
@@ -10,13 +18,21 @@ const {
   PROVIDER_HEALTH_ALERT_CREATED,
   PROVIDER_EXECUTION_REQUESTED,
   RETRY_BUDGET_EXHAUSTED,
+  SELF_REFLECTION_RECORDED,
   TAKEOVER_ACTION_RECEIVED,
   TAKEOVER_NOTIFICATION_SENT,
   TAKEOVER_REQUESTED,
   createAuditEvent
 } = require("../platform/audit");
+const path = require("path");
 const { ValidationError } = require("../platform/contracts");
+const {
+  AuthorizationRequiredError,
+  AuthorizationWorkflowManager,
+  JsonFileAuthorizationRequestStore
+} = require("../platform/authorizationWorkflow");
 const { loadFeatureFlags } = require("../platform/featureFlags");
+const { JsonFilePolicyStore } = require("../platform/policyStore");
 const { JsonlAuditMaintenanceHistoryStore } = require("../monitoring/auditMaintenanceHistoryStore");
 const { DiscussionEngine } = require("../discussion/discussionEngine");
 const { ProviderDiscoveryService } = require("../monitoring/providerDiscovery");
@@ -25,10 +41,12 @@ const { buildDefaultProviderRegistry } = require("../providers/providerRegistry"
 const { InMemoryTakeoverStore, JsonFileTakeoverStore } = require("../takeover/takeoverStore");
 const { TAKEOVER_ACTIONS, TakeoverWorkflowManager } = require("../takeover/takeoverWorkflow");
 const { JsonlAuditEventStore } = require("./auditEventStore");
+const { BudgetExceededError, ExecutionGovernor } = require("./executionGovernor");
 const { FallbackPolicyEvaluator } = require("./fallbackPolicy");
 const { AdaptiveProviderRouter } = require("./providerRouter");
 const { RetryBudgetManager } = require("./retryBudgetManager");
 const { TASK_STATES, applyTransition, createTaskSnapshot, isValidState } = require("./taskStateMachine");
+const { ensureTraceId } = require("../platform/trace");
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -97,6 +115,11 @@ function replayTaskFromEvents(events) {
 
 class TaskOrchestrator {
   constructor(options = {}) {
+    const isolatedDataRoot = options.dataRoot || (
+      options.eventStore && options.eventStore.filePath
+        ? path.dirname(options.eventStore.filePath)
+        : ""
+    );
     this.flags = options.flags || loadFeatureFlags(options.flagPath);
     this.eventStore = options.eventStore || new JsonlAuditEventStore(options.eventStoreOptions || {});
     this.providerRegistry = options.providerRegistry || buildDefaultProviderRegistry({
@@ -122,6 +145,41 @@ class TaskOrchestrator {
     this.fallbackPolicy = options.fallbackPolicy || new FallbackPolicyEvaluator(options.fallbackPolicyOptions || {});
     this.providerRouter = options.providerRouter || new AdaptiveProviderRouter(options.providerRouterOptions || {});
     this.retryBudgetManager = options.retryBudgetManager || new RetryBudgetManager(options.retryBudgetOptions || {});
+    const authorizationWorkflow = options.authorizationWorkflow || new AuthorizationWorkflowManager({
+      notifier: options.imNotifier,
+      policyStore: new JsonFilePolicyStore({
+        filePath: isolatedDataRoot ? path.join(isolatedDataRoot, "policies.json") : undefined
+      }),
+      requestStore: new JsonFileAuthorizationRequestStore({
+        filePath: isolatedDataRoot ? path.join(isolatedDataRoot, "authorization-requests.json") : undefined
+      })
+    });
+    this.executionGovernor = options.executionGovernor || new ExecutionGovernor({
+      providerProfiles: this.providerRouter.profiles,
+      authorizationWorkflow,
+      usageLedger: options.usageLedger,
+      semanticCache: options.semanticCache,
+      knowledgeStore: options.knowledgeStore,
+      handoffSnapshotStore: options.handoffSnapshotStore,
+      selfReflectionStore: options.selfReflectionStore,
+      usageLedgerOptions: {
+        filePath: isolatedDataRoot ? path.join(isolatedDataRoot, "token-usage.jsonl") : undefined
+      },
+      semanticCacheOptions: {
+        filePath: isolatedDataRoot ? path.join(isolatedDataRoot, "semantic-cache.jsonl") : undefined
+      },
+      knowledgeStoreOptions: {
+        filePath: isolatedDataRoot ? path.join(isolatedDataRoot, "knowledge-transfer.jsonl") : undefined
+      },
+      handoffSnapshotStoreOptions: {
+        filePath: isolatedDataRoot ? path.join(isolatedDataRoot, "handoff-snapshots.jsonl") : undefined
+      },
+      selfReflectionStoreOptions: {
+        filePath: isolatedDataRoot ? path.join(isolatedDataRoot, "self-reflection.jsonl") : undefined,
+        guardrailPath: isolatedDataRoot ? path.join(isolatedDataRoot, "system-guardrails.json") : undefined
+      }
+    });
+    this.authorizationWorkflow = options.authorizationWorkflow || this.executionGovernor.authorizationWorkflow || authorizationWorkflow;
     this.taskSnapshotStore = options.taskSnapshotStore || null;
     this.tasks = new Map();
   }
@@ -137,9 +195,10 @@ class TaskOrchestrator {
     if (this.tasks.has(task_id)) {
       throw new ValidationError(`Task already exists: ${task_id}`);
     }
+    const traceId = ensureTraceId(trace_id, "task");
     const task = createTaskSnapshot({
       task_id,
-      trace_id,
+      trace_id: traceId,
       task_type,
       metadata,
       state: TASK_STATES.PENDING,
@@ -148,7 +207,7 @@ class TaskOrchestrator {
     });
 
     const event = createAuditEvent({
-      trace_id,
+      trace_id: traceId,
       task_id,
       attempt_id: createAttemptId(task.attempt),
       actor,
@@ -334,6 +393,28 @@ class TaskOrchestrator {
     return this.takeoverWorkflow.listPending();
   }
 
+  listAuthorizationRequests(status = "") {
+    return this.authorizationWorkflow.requestStore.list(status);
+  }
+
+  resolveAuthorizationRequest(payload) {
+    const resolved = this.authorizationWorkflow.resolveRequest(payload);
+    const event = createAuditEvent({
+      trace_id: resolved.trace_id || ensureTraceId("", "auth"),
+      task_id: resolved.task_id || `auth-${resolved.request_id}`,
+      attempt_id: "attempt-0",
+      actor: resolved.resolved_by || "operator",
+      source: "authorization-workflow",
+      event_type: AUTHORIZATION_RESOLVED,
+      payload: {
+        request_id: resolved.request_id,
+        status: resolved.status
+      }
+    });
+    this.eventStore.append(event);
+    return resolved;
+  }
+
   async runProviderDiscovery({
     actor = "system",
     source = "scheduler"
@@ -498,6 +579,7 @@ class TaskOrchestrator {
     task_id,
     prompt,
     participants = [],
+    participant_profiles = {},
     quorum = 2,
     actor = "operator",
     source = "discussion-api"
@@ -531,6 +613,7 @@ class TaskOrchestrator {
       task,
       prompt,
       participants,
+      participant_profiles,
       quorum,
       actor,
       source
@@ -572,6 +655,10 @@ class TaskOrchestrator {
     return this.discussionEngine.getLatest(taskId);
   }
 
+  getMailbox(agent) {
+    return this.discussionEngine.getMailbox(agent);
+  }
+
   async executeTask({
     task_id,
     provider = "",
@@ -594,9 +681,133 @@ class TaskOrchestrator {
       throw new ValidationError("input is required for provider execution");
     }
     this.retryBudgetManager.assertCanUseAttempt(current, current.attempt);
+    let preparedExecution;
+    try {
+      preparedExecution = await this.executionGovernor.prepareExecution({
+        task: current,
+        input,
+        provider,
+        model,
+        metadata: {
+          ...current.metadata,
+          ...metadata,
+          routing_mode: execution_options.routing_mode || current.metadata.routing_mode || "balanced"
+        },
+        enabledProviders: this.providerRegistry.getEnabledProviders()
+      });
+    } catch (err) {
+      if (err instanceof AuthorizationRequiredError) {
+        const waitingTask = this.transitionTask({
+          task_id: current.task_id,
+          to_state: TASK_STATES.WAITING_HUMAN,
+          actor,
+          source,
+          reason: err.code || "AUTHORIZATION_REQUIRED",
+          error_message: err.message,
+          metadata: {
+            authorization_request_id: err.request ? err.request.request_id : ""
+          }
+        });
+        const authEvent = createAuditEvent({
+          trace_id: waitingTask.trace_id,
+          task_id: waitingTask.task_id,
+          attempt_id: createAttemptId(waitingTask.attempt),
+          actor,
+          source,
+          event_type: GOVERNANCE_AUTH_REQUESTED,
+          payload: {
+            request_id: err.request ? err.request.request_id : "",
+            request_type: err.request ? err.request.request_type : err.code
+          }
+        });
+        this.eventStore.append(authEvent);
+        err.failed_task = waitingTask;
+      } else if (err instanceof BudgetExceededError) {
+        const budgetEvent = createAuditEvent({
+          trace_id: current.trace_id,
+          task_id: current.task_id,
+          attempt_id: createAttemptId(current.attempt),
+          actor,
+          source,
+          event_type: GOVERNANCE_BUDGET_BLOCKED,
+          payload: {
+            error_code: err.code,
+            details: err.details || {}
+          }
+        });
+        this.eventStore.append(budgetEvent);
+      }
+      throw err;
+    }
+
+    if (preparedExecution.context_compressed) {
+      this.eventStore.append(createAuditEvent({
+        trace_id: current.trace_id,
+        task_id: current.task_id,
+        attempt_id: createAttemptId(current.attempt),
+        actor,
+        source,
+        event_type: GOVERNANCE_CONTEXT_COMPRESSED,
+        payload: {
+          tier: preparedExecution.tier_decision.tier
+        }
+      }));
+    }
+
+    if (preparedExecution.tier_decision.requires_committee) {
+      if (this.flags.discussion_engine_enabled !== true) {
+        throw new ValidationError("High-risk task requires committee review, but discussion engine is disabled");
+      }
+      const discussion = this.runTaskDiscussion({
+        task_id: current.task_id,
+        prompt: `Blind review required for high-risk task.\n\n${preparedExecution.outbound_input}`,
+        participants: execution_options.committee_participants || ["planner", "executor", "reviewer"],
+        participant_profiles: execution_options.participant_profiles || {},
+        quorum: Number.isInteger(execution_options.committee_quorum) ? execution_options.committee_quorum : 2,
+        actor,
+        source: "governed-discussion"
+      });
+      if (discussion.decision !== "APPROVE") {
+        const reviewError = new ValidationError("Committee review rejected the high-risk execution");
+        this.executionGovernor.recordExecutionFailure({
+          task: current,
+          input: preparedExecution.outbound_input,
+          error: reviewError,
+          metadata
+        });
+        this.eventStore.append(createAuditEvent({
+          trace_id: current.trace_id,
+          task_id: current.task_id,
+          attempt_id: createAttemptId(current.attempt),
+          actor,
+          source,
+          event_type: HANDOFF_SNAPSHOT_CREATED,
+          payload: {
+            reason: "COMMITTEE_REJECTED"
+          }
+        }));
+        throw reviewError;
+      }
+    }
+
+    if (preparedExecution.cache_hit) {
+      this.eventStore.append(createAuditEvent({
+        trace_id: current.trace_id,
+        task_id: current.task_id,
+        attempt_id: createAttemptId(current.attempt),
+        actor,
+        source,
+        event_type: GOVERNANCE_CACHE_HIT,
+        payload: {
+          provider: preparedExecution.cache_hit.entry.provider,
+          score: preparedExecution.cache_hit.score
+        }
+      }));
+      return this.executionGovernor.buildCacheResponse(current, preparedExecution.cache_hit);
+    }
 
     const enabledProviders = this.providerRegistry.getEnabledProviders();
-    const preferredProvider = provider || current.metadata.preferred_provider || "";
+    const preferredProvider = preparedExecution.provider || provider || current.metadata.preferred_provider || "";
     const routingMode = execution_options.routing_mode || current.metadata.routing_mode || "balanced";
     const routingPlan = this.flags.adaptive_routing_enabled
       ? this.providerRouter.rankProviders({
@@ -605,7 +816,7 @@ class TaskOrchestrator {
           mode: routingMode,
           preferredProvider,
           fallbackProviders: fallback_providers,
-          desiredModel: model,
+          desiredModel: preparedExecution.model,
           taskType: current.task_type
         })
       : this.fallbackPolicy.buildProviderCandidates({
@@ -616,7 +827,7 @@ class TaskOrchestrator {
           provider: item,
           model: this.providerRouter.selectModel({
             provider: item,
-            desiredModel: model,
+            desiredModel: preparedExecution.model,
             taskType: current.task_type
           }),
           score: 0
@@ -632,7 +843,7 @@ class TaskOrchestrator {
     let lastError = null;
     for (let idx = 0; idx < candidates.length; idx += 1) {
       const selectedProvider = candidates[idx];
-      const selectedModel = modelByProvider[selectedProvider] || model;
+      const selectedModel = modelByProvider[selectedProvider] || preparedExecution.model || model;
       if (idx > 0) {
         const fallbackEvent = createAuditEvent({
           trace_id: current.trace_id,
@@ -658,12 +869,12 @@ class TaskOrchestrator {
         source,
         event_type: PROVIDER_EXECUTION_REQUESTED,
         payload: {
-          selected_provider: selectedProvider,
-          model: selectedModel,
-          input_preview: input.slice(0, 200),
-          metadata,
-          routing_mode: routingMode,
-          adaptive_routing_enabled: this.flags.adaptive_routing_enabled === true
+            selected_provider: selectedProvider,
+            model: selectedModel,
+            input_preview: preparedExecution.outbound_input.slice(0, 200),
+            metadata,
+            routing_mode: routingMode,
+            adaptive_routing_enabled: this.flags.adaptive_routing_enabled === true
         }
       });
       this.eventStore.append(requestedEvent);
@@ -675,7 +886,7 @@ class TaskOrchestrator {
             task_id: current.task_id,
             trace_id: current.trace_id,
             model: selectedModel,
-            input,
+            input: preparedExecution.outbound_input,
             simulation: execution_options.simulation || {}
           }
         });
@@ -696,6 +907,61 @@ class TaskOrchestrator {
           }
         });
         this.eventStore.append(completedEvent);
+        this.executionGovernor.recordExecutionResult({
+          task: current,
+          input: preparedExecution.outbound_input,
+          provider: execution.selected_provider,
+          model: execution.result.model || selectedModel,
+          result: execution.result
+        });
+        const shadowEnabled = this.flags.shadow_execution_enabled === true || execution_options.shadow_execution === true;
+        if (shadowEnabled) {
+          const shadowProvider = enabledProviders.find((item) => item !== execution.selected_provider);
+          if (shadowProvider) {
+            const shadowModel = this.providerRouter.selectModel({
+              provider: shadowProvider,
+              desiredModel: "",
+              taskType: current.task_type
+            });
+            this.providerRegistry.execute({
+              provider: shadowProvider,
+              request: {
+                task_id: current.task_id,
+                trace_id: current.trace_id,
+                model: shadowModel,
+                input: preparedExecution.outbound_input,
+                simulation: execution_options.shadow_simulation || {}
+              }
+            }).then((shadowExecution) => {
+              this.eventStore.append(createAuditEvent({
+                trace_id: current.trace_id,
+                task_id: current.task_id,
+                attempt_id: createAttemptId(current.attempt),
+                actor,
+                source,
+                event_type: SHADOW_EXECUTION_COMPLETED,
+                payload: {
+                  provider: shadowExecution.selected_provider,
+                  model: shadowExecution.result.model || shadowModel,
+                  status: shadowExecution.result.status
+                }
+              }));
+            }).catch((shadowError) => {
+              this.eventStore.append(createAuditEvent({
+                trace_id: current.trace_id,
+                task_id: current.task_id,
+                attempt_id: createAttemptId(current.attempt),
+                actor,
+                source,
+                event_type: SHADOW_EXECUTION_FAILED,
+                payload: {
+                  provider: shadowProvider,
+                  error_code: shadowError && shadowError.code ? shadowError.code : "SHADOW_EXECUTION_ERROR"
+                }
+              }));
+            });
+          }
+        }
 
         return clone({
           ...execution,
@@ -750,6 +1016,34 @@ class TaskOrchestrator {
       }
     });
     this.eventStore.append(exhaustedEvent);
+    this.executionGovernor.recordExecutionFailure({
+      task: current,
+      input: preparedExecution.outbound_input,
+      error: lastError || new Error("Provider execution failed"),
+      metadata
+    });
+    this.eventStore.append(createAuditEvent({
+      trace_id: current.trace_id,
+      task_id: current.task_id,
+      attempt_id: createAttemptId(current.attempt),
+      actor,
+      source,
+      event_type: HANDOFF_SNAPSHOT_CREATED,
+      payload: {
+        reason: lastError && lastError.code ? lastError.code : "EXECUTION_FAILURE"
+      }
+    }));
+    this.eventStore.append(createAuditEvent({
+      trace_id: current.trace_id,
+      task_id: current.task_id,
+      attempt_id: createAttemptId(current.attempt),
+      actor,
+      source,
+      event_type: SELF_REFLECTION_RECORDED,
+      payload: {
+        task_type: current.task_type
+      }
+    }));
 
     const shouldEscalateTakeover = this.flags.takeover_engine_enabled === true;
     if (shouldEscalateTakeover) {

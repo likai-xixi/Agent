@@ -1,49 +1,49 @@
 {
-  "timestamp": "2026-03-17T00:00:18.314Z",
-  "started_at": "2026-03-17T00:00:18.278Z",
-  "completed_at": "2026-03-17T00:00:18.314Z",
+  "timestamp": "2026-03-17T01:04:29.328Z",
+  "started_at": "2026-03-17T01:04:29.289Z",
+  "completed_at": "2026-03-17T01:04:29.328Z",
   "interval_seconds": 0,
   "iterations_requested": 1,
   "runs": [
     {
-      "timestamp": "2026-03-17T00:00:18.314Z",
-      "started_at": "2026-03-17T00:00:18.282Z",
+      "timestamp": "2026-03-17T01:04:29.328Z",
+      "started_at": "2026-03-17T01:04:29.292Z",
       "source": "data\\audit-events.jsonl",
       "archive_dir": "data\\audit-archive",
       "actor": "ops-scheduler",
       "archive": {
-        "timestamp": "2026-03-17T00:00:18.287Z",
+        "timestamp": "2026-03-17T01:04:29.298Z",
         "source": "data\\audit-events.jsonl",
         "archive_dir": "data\\audit-archive",
         "events_count": 600,
         "archived": true,
         "manifest": {
-          "archive_id": "ARCHIVE-20260317000018284-0e0f61d9",
-          "archive_file": "ARCHIVE-20260317000018284-0e0f61d9.jsonl",
+          "archive_id": "ARCHIVE-20260317010429294-7d57529e",
+          "archive_file": "ARCHIVE-20260317010429294-7d57529e.jsonl",
           "events_count": 600,
           "payload_hash": "7e1a691ce7df64eb376659289f12511eb98cc338779dec3087980964a7e2d016",
           "source": "data\\audit-events.jsonl",
           "actor": "ops-scheduler",
-          "created_at": "2026-03-17T00:00:18.284Z"
+          "created_at": "2026-03-17T01:04:29.294Z"
         },
         "verification": {
           "valid": true,
           "reason": "OK",
-          "archive_id": "ARCHIVE-20260317000018284-0e0f61d9",
+          "archive_id": "ARCHIVE-20260317010429294-7d57529e",
           "expected_hash": "7e1a691ce7df64eb376659289f12511eb98cc338779dec3087980964a7e2d016",
           "actual_hash": "7e1a691ce7df64eb376659289f12511eb98cc338779dec3087980964a7e2d016"
         },
         "success": true
       },
       "retention": {
-        "timestamp": "2026-03-17T00:00:18.288Z",
+        "timestamp": "2026-03-17T01:04:29.298Z",
         "archive_dir": "data\\audit-archive",
         "policy": {
           "min_archives": 0,
           "max_archives": 500,
           "max_age_days": 30
         },
-        "archive_count": 28,
+        "archive_count": 31,
         "integrity_failures": [],
         "stale_archives": [],
         "success": true,
@@ -58,11 +58,11 @@
   ],
   "success": true,
   "history_entry": {
-    "run_id": "07dd947f-bcfc-46a4-827f-700594dadbd7",
-    "recorded_at": "2026-03-17T00:00:18.314Z",
-    "timestamp": "2026-03-17T00:00:18.314Z",
-    "started_at": "2026-03-17T00:00:18.278Z",
-    "completed_at": "2026-03-17T00:00:18.314Z",
+    "run_id": "977d8ece-6b7f-4c8b-a386-6724b01957a9",
+    "recorded_at": "2026-03-17T01:04:29.328Z",
+    "timestamp": "2026-03-17T01:04:29.328Z",
+    "started_at": "2026-03-17T01:04:29.289Z",
+    "completed_at": "2026-03-17T01:04:29.328Z",
     "status": "SUCCESS",
     "success": true,
     "interval_seconds": 0,
@@ -71,44 +71,44 @@
     "failed_reasons": [],
     "runs": [
       {
-        "timestamp": "2026-03-17T00:00:18.314Z",
-        "started_at": "2026-03-17T00:00:18.282Z",
+        "timestamp": "2026-03-17T01:04:29.328Z",
+        "started_at": "2026-03-17T01:04:29.292Z",
         "source": "data\\audit-events.jsonl",
         "archive_dir": "data\\audit-archive",
         "actor": "ops-scheduler",
         "archive": {
-          "timestamp": "2026-03-17T00:00:18.287Z",
+          "timestamp": "2026-03-17T01:04:29.298Z",
           "source": "data\\audit-events.jsonl",
           "archive_dir": "data\\audit-archive",
           "events_count": 600,
           "archived": true,
           "manifest": {
-            "archive_id": "ARCHIVE-20260317000018284-0e0f61d9",
-            "archive_file": "ARCHIVE-20260317000018284-0e0f61d9.jsonl",
+            "archive_id": "ARCHIVE-20260317010429294-7d57529e",
+            "archive_file": "ARCHIVE-20260317010429294-7d57529e.jsonl",
             "events_count": 600,
             "payload_hash": "7e1a691ce7df64eb376659289f12511eb98cc338779dec3087980964a7e2d016",
             "source": "data\\audit-events.jsonl",
             "actor": "ops-scheduler",
-            "created_at": "2026-03-17T00:00:18.284Z"
+            "created_at": "2026-03-17T01:04:29.294Z"
           },
           "verification": {
             "valid": true,
             "reason": "OK",
-            "archive_id": "ARCHIVE-20260317000018284-0e0f61d9",
+            "archive_id": "ARCHIVE-20260317010429294-7d57529e",
             "expected_hash": "7e1a691ce7df64eb376659289f12511eb98cc338779dec3087980964a7e2d016",
             "actual_hash": "7e1a691ce7df64eb376659289f12511eb98cc338779dec3087980964a7e2d016"
           },
           "success": true
         },
         "retention": {
-          "timestamp": "2026-03-17T00:00:18.288Z",
+          "timestamp": "2026-03-17T01:04:29.298Z",
           "archive_dir": "data\\audit-archive",
           "policy": {
             "min_archives": 0,
             "max_archives": 500,
             "max_age_days": 30
           },
-          "archive_count": 28,
+          "archive_count": 31,
           "integrity_failures": [],
           "stale_archives": [],
           "success": true,

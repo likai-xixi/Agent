@@ -4,8 +4,9 @@ const { randomUUID } = require("crypto");
 const { DatabaseSync } = require("node:sqlite");
 
 const { computeEventHash } = require("../orchestrator/auditEventStore");
+const { resolveDataPath } = require("../platform/appPaths");
 
-const DEFAULT_DB_PATH = path.join("data", "runtime-state.db");
+const DEFAULT_DB_PATH = resolveDataPath("runtime-state.db");
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));

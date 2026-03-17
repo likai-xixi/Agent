@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const { resolveDataPath } = require("../platform/appPaths");
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -31,7 +32,7 @@ class InMemoryTakeoverStore {
 
 class JsonFileTakeoverStore {
   constructor(options = {}) {
-    this.filePath = options.filePath || path.join("data", "takeover-records.json");
+    this.filePath = options.filePath || resolveDataPath("takeover-records.json");
     this.ensureStorePath();
   }
 
