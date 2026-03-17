@@ -1,0 +1,13 @@
+{
+  "checkpoint_id": "CKPT-YYYYMMDD-NNN",
+  "step_id": "STEP-YYYYMMDD-NNN",
+  "git_commit": "TO_BE_FILLED_AFTER_COMMIT",
+  "git_tag": "",
+  "db_down_migration": "N/A",
+  "config_rollback": "git checkout <stable_commit> -- config/feature_flags.json",
+  "health_checks": [
+    "node scripts/verify-governance.js",
+    "npm test"
+  ],
+  "created_at": "YYYY-MM-DDTHH:MM:SSZ"
+}

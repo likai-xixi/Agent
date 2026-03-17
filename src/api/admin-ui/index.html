@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ops Admin Console</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/admin/styles.css" />
+</head>
+<body>
+  <div class="bg-grid"></div>
+  <header class="hero">
+    <div>
+      <p class="eyebrow">Multi-Agent Operations</p>
+      <h1>Admin Console</h1>
+      <p class="subtitle">Track tasks, inspect state, and trigger retry/takeover actions without CLI.</p>
+    </div>
+    <button id="refresh-button" class="ghost">Refresh</button>
+  </header>
+
+  <main class="layout">
+    <section class="panel summary-panel">
+      <div class="panel-title-row">
+        <h2>Status Cards</h2>
+        <span id="last-updated" class="dim"></span>
+      </div>
+      <div id="summary-cards" class="summary-cards"></div>
+    </section>
+
+    <section class="panel tasks-panel">
+      <div class="panel-title-row">
+        <h2>Task Queue</h2>
+        <div class="filters">
+          <select id="state-filter">
+            <option value="">All states</option>
+            <option value="PENDING">PENDING</option>
+            <option value="RUNNING">RUNNING</option>
+            <option value="WAITING_HUMAN">WAITING_HUMAN</option>
+            <option value="FAILED">FAILED</option>
+            <option value="COMPLETED">COMPLETED</option>
+            <option value="CANCELLED">CANCELLED</option>
+          </select>
+          <input id="search-input" type="text" placeholder="Search by task id" />
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Task ID</th>
+              <th>Type</th>
+              <th>State</th>
+              <th>Attempt</th>
+              <th>Updated</th>
+            </tr>
+          </thead>
+          <tbody id="task-table-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel detail-panel">
+      <div class="panel-title-row">
+        <h2>Task Detail</h2>
+        <span id="selected-task-label" class="dim">No task selected</span>
+      </div>
+      <pre id="task-detail-json" class="detail-box"></pre>
+
+      <div class="action-form">
+        <label for="action-input">Execution Input (optional)</label>
+        <textarea id="action-input" rows="4" placeholder="Add prompt to execute while taking over/retrying"></textarea>
+        <div class="action-row">
+          <label for="provider-select">Provider</label>
+          <select id="provider-select">
+            <option value="">Auto</option>
+            <option value="local">local</option>
+            <option value="openai">openai</option>
+            <option value="gemini">gemini</option>
+            <option value="claude">claude</option>
+          </select>
+          <label for="fallback-input">Fallback providers</label>
+          <input id="fallback-input" type="text" placeholder="openai,gemini" />
+        </div>
+        <div class="button-row">
+          <button data-action="APPROVE">Approve</button>
+          <button data-action="RETRY">Retry</button>
+          <button data-action="TAKEOVER">Takeover</button>
+          <button data-action="ABORT" class="danger">Abort</button>
+        </div>
+      </div>
+
+      <div id="result-banner" class="result-banner"></div>
+    </section>
+
+    <section class="panel config-panel">
+      <div class="panel-title-row">
+        <h2>Configuration Center</h2>
+        <span id="settings-status" class="dim">Loading settings...</span>
+      </div>
+      <div class="config-grid">
+        <article class="config-card">
+          <h3>Feature Flags</h3>
+          <p class="dim">Control runtime capabilities and provider availability.</p>
+          <div id="flags-fields" class="checkbox-grid"></div>
+          <button id="save-flags">Save Feature Flags</button>
+        </article>
+
+        <article class="config-card">
+          <h3>Provider Models</h3>
+          <p class="dim">Default model and cost hints used by adaptive routing.</p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Provider</th>
+                  <th>Default model</th>
+                  <th>Cost / 1k tokens</th>
+                </tr>
+              </thead>
+              <tbody id="profiles-body"></tbody>
+            </table>
+          </div>
+          <button id="save-profiles">Save Provider Profiles</button>
+        </article>
+
+        <article class="config-card">
+          <h3>Role Defaults</h3>
+          <p class="dim">Manage RBAC baseline and default roles for unclassified endpoints.</p>
+          <label class="inline-checkbox">
+            <input id="rbac-enabled" type="checkbox" />
+            Enable RBAC
+          </label>
+          <div class="checkbox-grid">
+            <label class="inline-checkbox"><input id="role-super-admin" type="checkbox" /> super_admin</label>
+            <label class="inline-checkbox"><input id="role-task-admin" type="checkbox" /> task_admin</label>
+            <label class="inline-checkbox"><input id="role-read-only-auditor" type="checkbox" /> read_only_auditor</label>
+          </div>
+          <button id="save-rbac">Save RBAC Defaults</button>
+        </article>
+
+        <article class="config-card">
+          <h3>Provider Secrets</h3>
+          <p class="dim">Values stay masked in UI and are stored in encrypted vault.</p>
+          <div id="secrets-list" class="detail-box"></div>
+          <div class="action-row">
+            <label for="secret-name">Secret name</label>
+            <select id="secret-name">
+              <option value="OPENAI_API_KEY">OPENAI_API_KEY</option>
+              <option value="GEMINI_API_KEY">GEMINI_API_KEY</option>
+              <option value="CLAUDE_API_KEY">CLAUDE_API_KEY</option>
+              <option value="ANTHROPIC_API_KEY">ANTHROPIC_API_KEY</option>
+            </select>
+            <label for="secret-value">New value</label>
+            <input id="secret-value" type="password" placeholder="Paste new secret value" />
+          </div>
+          <button id="save-secret">Upsert Secret</button>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <script src="/admin/app.js" defer></script>
+</body>
+</html>

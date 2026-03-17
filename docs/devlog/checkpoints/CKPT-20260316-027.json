@@ -1,0 +1,17 @@
+{
+  "checkpoint_id": "CKPT-20260316-027",
+  "step_id": "STEP-20260316-027",
+  "git_commit": "checkpoint/CKPT-20260316-027",
+  "git_tag": "checkpoint/CKPT-20260316-027",
+  "db_down_migration": "N/A (no database schema changes in this step)",
+  "config_rollback": "git checkout HEAD~1 -- src/providers/claudeAdapter.js tests/claude-adapter.test.js docs/devlog/STEP-20260316-027.md docs/devlog/checkpoints/CKPT-20260316-027.json docs/handoff/CURRENT.md docs/backlog.md",
+  "health_checks": [
+    "node scripts/verify-governance.js",
+    "npm test",
+    "npm run drill:readiness",
+    "npm run drill:continuity",
+    "npm run test:load",
+    "npm run audit:maintenance"
+  ],
+  "created_at": "2026-03-16T22:27:50Z"
+}

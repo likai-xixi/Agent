@@ -1,0 +1,23 @@
+{
+  "name": "multi-agent-governance-baseline",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "governance:check": "node scripts/verify-governance.js",
+    "step:new": "node scripts/record-step.js",
+    "rollback:dryrun": "node scripts/rollback-from-checkpoint.js",
+    "audit:archive": "node scripts/archive-audit-events.js",
+    "audit:retention": "node scripts/audit-retention-check.js --write docs/handoff/RETENTION-LAST.json --max-age-days 30 --max-archives 500 --min-archives 0",
+    "audit:maintenance": "node scripts/audit-maintenance-cycle.js --write docs/handoff/AUDIT-MAINTENANCE-LAST.json --retention-write docs/handoff/RETENTION-LAST.json --alert-log docs/handoff/OPS-ALERTS-LAST.jsonl --escalation-policy config/alert_escalation_policy.json --suppression-store data/alert-suppression-window.json --iterations 1 --interval-seconds 0 --max-age-days 30 --max-archives 500 --min-archives 0",
+    "drill:continuity": "node scripts/continuity-drill.js --sample-size 3 --write docs/handoff/DRILL-LAST.json",
+    "drill:readiness": "node scripts/deployment-readiness.js --write docs/handoff/READINESS-LAST.json",
+    "db:migrate:up": "node scripts/db-migrate.js --up",
+    "db:migrate:down": "node scripts/db-migrate.js --down",
+    "secret:vault": "node scripts/secret-vault.js",
+    "secret:rotate": "node scripts/rotate-secrets.js",
+    "start:api": "node src/api/taskApiServer.js",
+    "test:load": "node scripts/load-test.js",
+    "test": "node --test tests/*.test.js"
+  }
+}

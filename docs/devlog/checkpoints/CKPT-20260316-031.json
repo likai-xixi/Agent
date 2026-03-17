@@ -1,0 +1,17 @@
+{
+  "checkpoint_id": "CKPT-20260316-031",
+  "step_id": "STEP-20260316-031",
+  "git_commit": "checkpoint/CKPT-20260316-031",
+  "git_tag": "checkpoint/CKPT-20260316-031",
+  "db_down_migration": "npm run db:migrate:down",
+  "config_rollback": "git checkout HEAD~1 -- src/persistence/sqliteRuntimeStore.js src/persistence/index.js scripts/db-migrate.js config/runtime_db.json src/orchestrator/orchestratorService.js src/api/taskApiServer.js package.json tests/sqlite-runtime-store.test.js tests/db-migrate.test.js tests/task-api-server.test.js README.md docs/runbooks/deployment.md docs/runbooks/rollback.md docs/devlog/STEP-20260316-031.md docs/devlog/checkpoints/CKPT-20260316-031.json docs/handoff/CURRENT.md docs/backlog.md",
+  "health_checks": [
+    "node scripts/verify-governance.js",
+    "npm test",
+    "npm run drill:readiness",
+    "npm run drill:continuity",
+    "npm run test:load",
+    "npm run audit:maintenance"
+  ],
+  "created_at": "2026-03-16T23:37:39Z"
+}

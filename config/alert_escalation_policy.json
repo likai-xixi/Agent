@@ -1,0 +1,24 @@
+{
+  "default_severity": "WARNING",
+  "profiles": {
+    "WARNING": {
+      "channel": "ops-warning",
+      "dedupe_window_seconds": 600
+    },
+    "CRITICAL": {
+      "channel": "ops-critical",
+      "dedupe_window_seconds": 120
+    }
+  },
+  "reason_severity": {
+    "INTEGRITY_FAILURE": "CRITICAL",
+    "ARCHIVE_HASH_MISMATCH": "CRITICAL",
+    "ARCHIVE_FILE_NOT_FOUND": "CRITICAL",
+    "ARCHIVE_COUNT_ABOVE_MAX": "WARNING",
+    "ARCHIVE_COUNT_BELOW_MIN": "WARNING",
+    "STALE_ARCHIVES_FOUND": "WARNING",
+    "RETENTION_FAILURE": "WARNING",
+    "UNKNOWN_FAILURE": "WARNING"
+  }
+}
+

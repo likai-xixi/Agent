@@ -1,0 +1,7 @@
+{
+  "auth_enabled": false,
+  "jwt_secret": "",
+  "jwt_issuer": "multi-agent-orchestrator",
+  "jwt_audience": "task-api",
+  "static_tokens": []
+}

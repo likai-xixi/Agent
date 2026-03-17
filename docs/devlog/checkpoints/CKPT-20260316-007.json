@@ -1,0 +1,14 @@
+{
+  "checkpoint_id": "CKPT-20260316-007",
+  "step_id": "STEP-20260316-007",
+  "git_commit": "checkpoint/CKPT-20260316-007",
+  "git_tag": "checkpoint/CKPT-20260316-007",
+  "db_down_migration": "N/A (no schema changes in this step)",
+  "config_rollback": "git checkout HEAD~1 -- config/feature_flags.json",
+  "health_checks": [
+    "node scripts/verify-governance.js",
+    "npm test",
+    "npm run test:load"
+  ],
+  "created_at": "2026-03-16T14:45:27Z"
+}

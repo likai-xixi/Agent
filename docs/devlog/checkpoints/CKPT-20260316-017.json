@@ -1,0 +1,17 @@
+{
+  "checkpoint_id": "CKPT-20260316-017",
+  "step_id": "STEP-20260316-017",
+  "git_commit": "checkpoint/CKPT-20260316-017",
+  "git_tag": "checkpoint/CKPT-20260316-017",
+  "db_down_migration": "N/A (no schema changes in this step)",
+  "config_rollback": "git checkout HEAD~1 -- .github/workflows/governance-gate.yml",
+  "health_checks": [
+    "node scripts/verify-governance.js",
+    "npm test",
+    "npm run drill:readiness",
+    "npm run drill:continuity",
+    "npm run test:load",
+    "npm run audit:retention"
+  ],
+  "created_at": "2026-03-16T19:31:45Z"
+}

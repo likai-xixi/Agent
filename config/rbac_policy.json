@@ -1,0 +1,6 @@
+{
+  "rbac_enabled": false,
+  "default_roles": [
+    "super_admin"
+  ]
+}

@@ -1,0 +1,45 @@
+name: Governance Gate
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  governance:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run governance gate
+        run: node scripts/verify-governance.js
+
+      - name: Run tests
+        run: npm test
+
+      - name: Run deployment readiness gate
+        run: npm run drill:readiness
+
+      - name: Run audit maintenance gate
+        run: npm run audit:maintenance
+
+      - name: Upload readiness artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: readiness-reports
+          path: |
+            docs/handoff/READINESS-LAST.json
+            docs/handoff/DRILL-LAST.json
+            docs/handoff/RETENTION-LAST.json
+            docs/handoff/AUDIT-MAINTENANCE-LAST.json
+            docs/handoff/OPS-ALERTS-LAST.jsonl

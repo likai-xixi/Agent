@@ -1,0 +1,4 @@
+{
+  "enabled": false,
+  "db_path": "data/runtime-state.db"
+}

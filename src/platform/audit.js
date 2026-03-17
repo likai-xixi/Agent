@@ -1,0 +1,132 @@
+const { hashPayload, nowUtcIso, validateAuditEvent } = require("./contracts");
+const REDACTED_VALUE = "[REDACTED]";
+const SENSITIVE_KEY_RE = /(api[_-]?key|secret|token|password|authorization|credential|private[_-]?key)/i;
+
+const STEP_LOGGED = "STEP_LOGGED";
+const CHECKPOINT_CREATED = "CHECKPOINT_CREATED";
+const ROLLBACK_EXECUTED = "ROLLBACK_EXECUTED";
+const HANDOFF_UPDATED = "HANDOFF_UPDATED";
+const PROVIDER_EXECUTION_REQUESTED = "PROVIDER_EXECUTION_REQUESTED";
+const PROVIDER_EXECUTION_COMPLETED = "PROVIDER_EXECUTION_COMPLETED";
+const PROVIDER_EXECUTION_FAILED = "PROVIDER_EXECUTION_FAILED";
+const FALLBACK_TRIGGERED = "FALLBACK_TRIGGERED";
+const RETRY_BUDGET_EXHAUSTED = "RETRY_BUDGET_EXHAUSTED";
+const TAKEOVER_REQUESTED = "TAKEOVER_REQUESTED";
+const TAKEOVER_NOTIFICATION_SENT = "TAKEOVER_NOTIFICATION_SENT";
+const TAKEOVER_ACTION_RECEIVED = "TAKEOVER_ACTION_RECEIVED";
+const PROVIDER_DISCOVERY_RUN = "PROVIDER_DISCOVERY_RUN";
+const PROVIDER_HEALTH_ALERT_CREATED = "PROVIDER_HEALTH_ALERT_CREATED";
+const PROVIDER_HEALTH_ALERT_ACKED = "PROVIDER_HEALTH_ALERT_ACKED";
+const DISCUSSION_STARTED = "DISCUSSION_STARTED";
+const DISCUSSION_COMPLETED = "DISCUSSION_COMPLETED";
+const DISCUSSION_DECISION_RECORDED = "DISCUSSION_DECISION_RECORDED";
+const API_AUTH_REJECTED = "API_AUTH_REJECTED";
+const API_AUTH_ACCEPTED = "API_AUTH_ACCEPTED";
+const API_AUTHZ_DENIED = "API_AUTHZ_DENIED";
+const API_AUTHZ_ALLOWED = "API_AUTHZ_ALLOWED";
+
+const DEFAULT_AUDIT_TYPES = new Set([
+  "TASK_CREATED",
+  "TASK_STATE_CHANGED",
+  "ROUTING_SELECTED",
+  "MODEL_SELECTED",
+  PROVIDER_EXECUTION_REQUESTED,
+  PROVIDER_EXECUTION_COMPLETED,
+  PROVIDER_EXECUTION_FAILED,
+  FALLBACK_TRIGGERED,
+  RETRY_BUDGET_EXHAUSTED,
+  TAKEOVER_REQUESTED,
+  TAKEOVER_NOTIFICATION_SENT,
+  TAKEOVER_ACTION_RECEIVED,
+  PROVIDER_DISCOVERY_RUN,
+  PROVIDER_HEALTH_ALERT_CREATED,
+  PROVIDER_HEALTH_ALERT_ACKED,
+  DISCUSSION_STARTED,
+  DISCUSSION_COMPLETED,
+  DISCUSSION_DECISION_RECORDED,
+  API_AUTH_REJECTED,
+  API_AUTH_ACCEPTED,
+  API_AUTHZ_DENIED,
+  API_AUTHZ_ALLOWED,
+  STEP_LOGGED,
+  CHECKPOINT_CREATED,
+  ROLLBACK_EXECUTED,
+  HANDOFF_UPDATED
+]);
+
+function redactSensitiveData(value, key = "") {
+  if (Array.isArray(value)) {
+    return value.map((item) => redactSensitiveData(item, key));
+  }
+
+  if (value && typeof value === "object") {
+    const cloned = {};
+    for (const [childKey, childValue] of Object.entries(value)) {
+      if (SENSITIVE_KEY_RE.test(childKey)) {
+        cloned[childKey] = REDACTED_VALUE;
+      } else {
+        cloned[childKey] = redactSensitiveData(childValue, childKey);
+      }
+    }
+    return cloned;
+  }
+
+  if (SENSITIVE_KEY_RE.test(key)) {
+    return REDACTED_VALUE;
+  }
+  return value;
+}
+
+function createAuditEvent({
+  trace_id,
+  task_id,
+  attempt_id,
+  actor,
+  source,
+  event_type,
+  payload
+}) {
+  const sanitizedPayload = redactSensitiveData(payload);
+  const event = {
+    trace_id,
+    task_id,
+    attempt_id,
+    actor,
+    source,
+    event_type,
+    payload: sanitizedPayload,
+    payload_hash: hashPayload(sanitizedPayload),
+    timestamp: nowUtcIso()
+  };
+  validateAuditEvent(event, DEFAULT_AUDIT_TYPES);
+  return event;
+}
+
+module.exports = {
+  CHECKPOINT_CREATED,
+  DEFAULT_AUDIT_TYPES,
+  HANDOFF_UPDATED,
+  PROVIDER_EXECUTION_COMPLETED,
+  PROVIDER_EXECUTION_FAILED,
+  PROVIDER_EXECUTION_REQUESTED,
+  FALLBACK_TRIGGERED,
+  PROVIDER_DISCOVERY_RUN,
+  PROVIDER_HEALTH_ALERT_ACKED,
+  PROVIDER_HEALTH_ALERT_CREATED,
+  DISCUSSION_COMPLETED,
+  DISCUSSION_DECISION_RECORDED,
+  DISCUSSION_STARTED,
+  API_AUTH_REJECTED,
+  API_AUTH_ACCEPTED,
+  API_AUTHZ_DENIED,
+  API_AUTHZ_ALLOWED,
+  TAKEOVER_ACTION_RECEIVED,
+  TAKEOVER_NOTIFICATION_SENT,
+  TAKEOVER_REQUESTED,
+  RETRY_BUDGET_EXHAUSTED,
+  ROLLBACK_EXECUTED,
+  STEP_LOGGED,
+  REDACTED_VALUE,
+  redactSensitiveData,
+  createAuditEvent
+};
