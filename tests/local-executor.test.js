@@ -159,3 +159,35 @@ test("local executor blocks obvious network commands when isolation is enabled",
     network_isolation: true
   }));
 });
+
+test("local executor rejects exec when cwd does not physically exist", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "local-executor-cwd-"));
+  const workspace = path.join(root, "workspace");
+  const missingCwd = path.join(root, "missing");
+  fs.mkdirSync(workspace, { recursive: true });
+  const authorizationWorkflow = createAuthorizationWorkflow(root);
+  authorizationWorkflow.policyStore.grantPathAccess(workspace, {
+    mode: "permanent",
+    actor: "tester",
+    trace_id: "trace-cwd"
+  });
+  authorizationWorkflow.policyStore.grantPathAccess(missingCwd, {
+    mode: "permanent",
+    actor: "tester",
+    trace_id: "trace-cwd"
+  });
+  const executor = new LocalExecutor({
+    workspaceRoot: workspace,
+    authorizationWorkflow,
+    gitSafetyEnabled: false
+  });
+
+  await assert.rejects(() => executor.execCommand({
+    trace_id: "trace-cwd",
+    task_id: "task-cwd",
+    command: process.execPath,
+    args: ["-e", "console.log('hello')"],
+    cwd: missingCwd,
+    network_isolation: false
+  }));
+});

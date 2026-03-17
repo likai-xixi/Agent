@@ -1,4 +1,5 @@
 const { ValidationError } = require("../platform/contracts");
+const { BudgetExceededError } = require("../platform/costControls");
 const { loadFeatureFlags } = require("../platform/featureFlags");
 const {
   PROVIDERS,
@@ -21,6 +22,7 @@ class ProviderRegistry {
   constructor(options = {}) {
     this.flags = options.flags || loadFeatureFlags(options.flagPath);
     this.healthOverrides = { ...(options.healthOverrides || {}) };
+    this.budgetCircuitBreaker = options.budgetCircuitBreaker || null;
     this.adapters = new Map();
   }
 
@@ -87,6 +89,10 @@ class ProviderRegistry {
     delete this.healthOverrides[providerName];
   }
 
+  setBudgetCircuitBreaker(budgetCircuitBreaker) {
+    this.budgetCircuitBreaker = budgetCircuitBreaker || null;
+  }
+
   selectProvider({ preferredProvider = "", fallbackProviders = [] } = {}) {
     const candidates = [];
     if (preferredProvider) {
@@ -124,13 +130,32 @@ class ProviderRegistry {
         });
     const adapter = this.getAdapter(selected);
     try {
+      if (this.budgetCircuitBreaker && typeof this.budgetCircuitBreaker.assertRequestAllowed === "function") {
+        this.budgetCircuitBreaker.assertRequestAllowed({
+          provider: selected,
+          model: request && request.model ? request.model : "",
+          input: request && request.input ? request.input : "",
+          trace_id: request && request.trace_id ? request.trace_id : "",
+          task_id: request && request.task_id ? request.task_id : ""
+        });
+      }
       const result = await adapter.execute(request);
+      if (this.budgetCircuitBreaker && typeof this.budgetCircuitBreaker.recordActualUsage === "function") {
+        this.budgetCircuitBreaker.recordActualUsage({
+          provider: selected,
+          model: result && result.model ? result.model : request.model,
+          input: request && request.input ? request.input : "",
+          result,
+          trace_id: request && request.trace_id ? request.trace_id : "",
+          task_id: request && request.task_id ? request.task_id : ""
+        });
+      }
       return {
         selected_provider: selected,
         result: clone(result)
       };
     } catch (err) {
-      if (err instanceof ProviderExecutionError) {
+      if (err instanceof ProviderExecutionError || err instanceof BudgetExceededError) {
         throw err;
       }
       throw new ProviderExecutionError(err && err.message ? err.message : "Provider execution failed", {

@@ -41,6 +41,10 @@ function createGovernor(root, overrides = {}) {
     usageLedgerOptions: {
       filePath: path.join(root, "usage.jsonl")
     },
+    balanceStoreOptions: {
+      filePath: path.join(root, "balance.json"),
+      currency: "USD"
+    },
     semanticCacheOptions: {
       filePath: path.join(root, "cache.jsonl"),
       threshold: 0.9
@@ -148,4 +152,29 @@ test("execution governor requires approval for expensive single task estimates",
     enabledProviders: ["openai"]
   }));
   assert.equal(governor.authorizationWorkflow.requestStore.list("PENDING").length, 1);
+});
+
+test("execution governor blocks when provider balance is exhausted", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "execution-governor-balance-"));
+  const governor = createGovernor(root);
+  governor.balanceStore.setBalance({
+    remaining_balance: 0,
+    actor: "tester"
+  });
+  const task = {
+    trace_id: "trace-balance",
+    task_id: "task-balance",
+    task_type: "analysis",
+    metadata: {}
+  };
+
+  await assert.rejects(() => governor.prepareExecution({
+    task,
+    input: "C".repeat(200),
+    enabledProviders: ["openai"]
+  }), (error) => {
+    assert.equal(error instanceof BudgetExceededError, true);
+    assert.equal(error.code, "BALANCE_EXHAUSTED");
+    return true;
+  });
 });

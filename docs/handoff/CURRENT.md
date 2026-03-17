@@ -1,8 +1,8 @@
 # Handoff Snapshot
 
-- Updated At: `2026-03-17T01:10:00Z`
+- Updated At: `2026-03-17T02:12:00Z`
 - Current Status: `done`
-- Current STEP_ID: `STEP-20260317-001`
+- Current STEP_ID: `STEP-20260317-002`
 
 ## Blockers
 
@@ -10,12 +10,12 @@
 
 ## Next Top 3
 
-1. Validate staged rollout policy for `local_runner_enabled`, `im_bridge_enabled`, and `shadow_execution_enabled`.
-2. Exercise a real intranet IM webhook against `/integrations/im/commands` and verify result callbacks.
-3. Decide production defaults for skill install and MCP mount approval workflows.
+1. Validate OSS leader election against a real bucket and confirm lease timing under network jitter.
+2. Exercise a real intranet IM webhook against the leader-gated ingress path.
+3. Decide operator workflow for replenishing provider balance via `/ops/budget`.
 
 ## Acceptance Criteria
 
-1. Sensitive execution, authorization, journaling, and audit logic remain closed-loop in the local Node.js runtime.
-2. Local runner enforces forbidden paths, dynamic authorization, scrubbing, resumable checkpoints, and resource/network circuit breakers.
-3. Webhook-based IM bridge can receive commands locally, route private messages, resolve authorizations, and send structured status updates back.
+1. IM command ingress is leader-gated by OSS heartbeat lease state.
+2. Local runner enforces forbidden paths and physical stat-based path validation before fs or exec actions.
+3. Provider execution is blocked at adapter-entry when balance or daily budget is exhausted.

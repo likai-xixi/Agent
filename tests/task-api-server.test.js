@@ -23,7 +23,7 @@ function buildFlags(overrides = {}) {
   };
 }
 
-function createServerForTest(flags = buildFlags()) {
+function createServerForTest(flags = buildFlags(), options = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "task-api-"));
   const filePath = path.join(dir, "events.jsonl");
   const eventStore = new JsonlAuditEventStore({ filePath });
@@ -35,7 +35,8 @@ function createServerForTest(flags = buildFlags()) {
   return createTaskApiServer({
     orchestrator,
     host: "127.0.0.1",
-    port: 0
+    port: 0,
+    ...options
   });
 }
 
@@ -660,6 +661,50 @@ test("task API can recover task state after restart with runtime SQLite persiste
     const listed = await requestJson(baseUrl, "GET", "/tasks?limit=10");
     assert.equal(listed.status, 200);
     assert.equal(listed.payload.tasks.some((item) => item.task_id === "runtime-db-task-1"), true);
+  } finally {
+    await app.stop();
+  }
+});
+
+test("task API rejects IM commands on satellite nodes and exposes leader state", async () => {
+  const leaderElectionManager = {
+    async start() {
+      return this.getState();
+    },
+    async stop() {
+      return this.getState();
+    },
+    canAcceptImCommands() {
+      return false;
+    },
+    getState() {
+      return {
+        node_id: "satellite-node-1",
+        assignment: "SATELLITE",
+        is_leader: false,
+        holder: {
+          node_id: "master-node-1"
+        }
+      };
+    }
+  };
+  const app = createServerForTest(buildFlags(), {
+    leaderElectionManager
+  });
+  const { port } = await app.start();
+  const baseUrl = `http://127.0.0.1:${port}`;
+
+  try {
+    const health = await requestJson(baseUrl, "GET", "/health");
+    assert.equal(health.status, 200);
+    assert.equal(health.payload.leader_election.is_leader, false);
+    assert.equal(health.payload.leader_election.assignment, "SATELLITE");
+
+    const blocked = await requestJson(baseUrl, "POST", "/integrations/im/commands", {
+      text: "@Coder run task"
+    });
+    assert.equal(blocked.status, 409);
+    assert.equal(blocked.payload.error, "CONFLICT");
   } finally {
     await app.stop();
   }

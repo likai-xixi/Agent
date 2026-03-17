@@ -1,14 +1,19 @@
 {
-  "timestamp": "2026-03-17T01:05:45.495Z",
+  "timestamp": "2026-03-17T02:11:44.996Z",
   "sample_size": 3,
   "sampled_checkpoints": [
+    "CKPT-20260317-002",
     "CKPT-20260317-001",
-    "CKPT-20260316-032",
-    "CKPT-20260316-031"
+    "CKPT-20260316-032"
   ],
   "flow_integrity": {
     "passed": true,
     "checks": [
+      {
+        "checkpoint_path": "docs\\devlog\\checkpoints\\CKPT-20260317-002.json",
+        "passed": true,
+        "errors": []
+      },
       {
         "checkpoint_path": "docs\\devlog\\checkpoints\\CKPT-20260317-001.json",
         "passed": true,
@@ -16,11 +21,6 @@
       },
       {
         "checkpoint_path": "docs\\devlog\\checkpoints\\CKPT-20260316-032.json",
-        "passed": true,
-        "errors": []
-      },
-      {
-        "checkpoint_path": "docs\\devlog\\checkpoints\\CKPT-20260316-031.json",
         "passed": true,
         "errors": []
       }
@@ -31,6 +31,11 @@
     "passed": true,
     "checks": [
       {
+        "checkpoint_path": "docs\\devlog\\checkpoints\\CKPT-20260317-002.json",
+        "exit_code": 0,
+        "output": "Rollback plan:\n- git revert --no-edit checkpoint/CKPT-20260317-002\n- git checkout HEAD~1 -- docs/backlog.md docs/devlog/STEP-20260317-002.md docs/devlog/checkpoints/CKPT-20260317-002.json docs/handoff/AUDIT-MAINTENANCE-LAST.json docs/handoff/CURRENT.md docs/handoff/DRILL-LAST.json docs/handoff/READINESS-LAST.json docs/handoff/RETENTION-LAST.json src/api/taskApiServer.js src/cluster/index.js src/cluster/heartbeatLock.js src/cluster/ossObjectStorageClient.js src/orchestrator/executionGovernor.js src/orchestrator/orchestratorService.js src/platform/costControls.js src/platform/index.js src/platform/localExecutor.js src/providers/providerRegistry.js tests/execution-governor.test.js tests/heartbeat-lock.test.js tests/local-executor.test.js tests/provider-registry.test.js tests/task-api-server.test.js\nPost-rollback health checks:\n- node scripts/verify-governance.js\n- npm test\n- npm run drill:readiness\n- npm run drill:continuity\n- npm run test:load\nDry-run mode. Add --execute to run commands."
+      },
+      {
         "checkpoint_path": "docs\\devlog\\checkpoints\\CKPT-20260317-001.json",
         "exit_code": 0,
         "output": "Rollback plan:\n- git revert --no-edit checkpoint/CKPT-20260317-001\n- git checkout HEAD~1 -- README.md config/feature_flags.json config/provider_profiles.json config/system_guardrails.json docs/backlog.md docs/devlog/STEP-20260317-001.md docs/devlog/checkpoints/CKPT-20260317-001.json docs/handoff/AUDIT-MAINTENANCE-LAST.json docs/handoff/CURRENT.md docs/handoff/DRILL-LAST.json docs/handoff/READINESS-LAST.json docs/handoff/RETENTION-LAST.json src/api/taskApiServer.js src/discussion/agentMailbox.js src/discussion/discussionEngine.js src/discussion/index.js src/integrations/imCommandBridge.js src/monitoring/index.js src/monitoring/selfHealingSupervisor.js src/orchestrator/auditEventStore.js src/orchestrator/executionGovernor.js src/orchestrator/orchestratorService.js src/persistence/sqliteRuntimeStore.js src/platform/appPaths.js src/platform/authorizationWorkflow.js src/platform/checkpointJournal.js src/platform/featureFlags.js src/platform/gitSafety.js src/platform/index.js src/platform/localExecutor.js src/platform/mcpRegistry.js src/platform/policyStore.js src/platform/sensitiveData.js src/platform/skillsRegistry.js src/platform/statusNarrator.js src/platform/trace.js src/platform/secretVault.js src/takeover/imNotifier.js tests/execution-governor.test.js tests/im-command-bridge.test.js tests/local-executor.test.js tests/skills-and-mcp.test.js\nPost-rollback health checks:\n- node scripts/verify-governance.js\n- npm test\n- npm run drill:readiness\n- npm run drill:continuity\n- npm run test:load\n- npm run audit:maintenance\nDry-run mode. Add --execute to run commands."
@@ -39,11 +44,6 @@
         "checkpoint_path": "docs\\devlog\\checkpoints\\CKPT-20260316-032.json",
         "exit_code": 0,
         "output": "Rollback plan:\n- git revert --no-edit checkpoint/CKPT-20260316-032\n- git checkout HEAD~1 -- docs/devlog/STEP-20260316-032.md docs/devlog/checkpoints/CKPT-20260316-032.json docs/handoff/CURRENT.md docs/handoff/READINESS-LAST.json docs/handoff/DRILL-LAST.json docs/handoff/AUDIT-MAINTENANCE-LAST.json docs/handoff/RETENTION-LAST.json docs/handoff/RELEASE-CHECKLIST-20260316.md docs/handoff/GO-LIVE-DECISION-20260316.md docs/backlog.md\nPost-rollback health checks:\n- node scripts/verify-governance.js\n- npm test\n- npm run drill:readiness\n- npm run drill:continuity\n- npm run test:load\n- npm run audit:maintenance\nDry-run mode. Add --execute to run commands."
-      },
-      {
-        "checkpoint_path": "docs\\devlog\\checkpoints\\CKPT-20260316-031.json",
-        "exit_code": 0,
-        "output": "Rollback plan:\n- git revert --no-edit checkpoint/CKPT-20260316-031\n- npm run db:migrate:down\n- git checkout HEAD~1 -- src/persistence/sqliteRuntimeStore.js src/persistence/index.js scripts/db-migrate.js config/runtime_db.json src/orchestrator/orchestratorService.js src/api/taskApiServer.js package.json tests/sqlite-runtime-store.test.js tests/db-migrate.test.js tests/task-api-server.test.js README.md docs/runbooks/deployment.md docs/runbooks/rollback.md docs/devlog/STEP-20260316-031.md docs/devlog/checkpoints/CKPT-20260316-031.json docs/handoff/CURRENT.md docs/backlog.md\nPost-rollback health checks:\n- node scripts/verify-governance.js\n- npm test\n- npm run drill:readiness\n- npm run drill:continuity\n- npm run test:load\n- npm run audit:maintenance\nDry-run mode. Add --execute to run commands."
       }
     ],
     "errors": []
@@ -51,7 +51,7 @@
   "handoff_drill": {
     "passed": true,
     "errors": [],
-    "current_step_id": "STEP-20260317-001",
+    "current_step_id": "STEP-20260317-002",
     "next_top3_count": 3
   },
   "overall_passed": true

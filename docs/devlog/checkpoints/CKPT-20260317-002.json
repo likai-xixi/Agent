@@ -1,0 +1,16 @@
+{
+  "checkpoint_id": "CKPT-20260317-002",
+  "step_id": "STEP-20260317-002",
+  "git_commit": "checkpoint/CKPT-20260317-002",
+  "git_tag": "checkpoint/CKPT-20260317-002",
+  "db_down_migration": "N/A",
+  "config_rollback": "git checkout HEAD~1 -- docs/backlog.md docs/devlog/STEP-20260317-002.md docs/devlog/checkpoints/CKPT-20260317-002.json docs/handoff/AUDIT-MAINTENANCE-LAST.json docs/handoff/CURRENT.md docs/handoff/DRILL-LAST.json docs/handoff/READINESS-LAST.json docs/handoff/RETENTION-LAST.json src/api/taskApiServer.js src/cluster/index.js src/cluster/heartbeatLock.js src/cluster/ossObjectStorageClient.js src/orchestrator/executionGovernor.js src/orchestrator/orchestratorService.js src/platform/costControls.js src/platform/index.js src/platform/localExecutor.js src/providers/providerRegistry.js tests/execution-governor.test.js tests/heartbeat-lock.test.js tests/local-executor.test.js tests/provider-registry.test.js tests/task-api-server.test.js",
+  "health_checks": [
+    "node scripts/verify-governance.js",
+    "npm test",
+    "npm run drill:readiness",
+    "npm run drill:continuity",
+    "npm run test:load"
+  ],
+  "created_at": "2026-03-17T02:07:23Z"
+}

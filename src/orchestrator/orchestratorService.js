@@ -158,12 +158,17 @@ class TaskOrchestrator {
       providerProfiles: this.providerRouter.profiles,
       authorizationWorkflow,
       usageLedger: options.usageLedger,
+      balanceStore: options.balanceStore,
+      budgetCircuitBreaker: options.budgetCircuitBreaker,
       semanticCache: options.semanticCache,
       knowledgeStore: options.knowledgeStore,
       handoffSnapshotStore: options.handoffSnapshotStore,
       selfReflectionStore: options.selfReflectionStore,
       usageLedgerOptions: {
         filePath: isolatedDataRoot ? path.join(isolatedDataRoot, "token-usage.jsonl") : undefined
+      },
+      balanceStoreOptions: {
+        filePath: isolatedDataRoot ? path.join(isolatedDataRoot, "provider-balance.json") : undefined
       },
       semanticCacheOptions: {
         filePath: isolatedDataRoot ? path.join(isolatedDataRoot, "semantic-cache.jsonl") : undefined
@@ -179,6 +184,9 @@ class TaskOrchestrator {
         guardrailPath: isolatedDataRoot ? path.join(isolatedDataRoot, "system-guardrails.json") : undefined
       }
     });
+    if (this.providerRegistry && typeof this.providerRegistry.setBudgetCircuitBreaker === "function") {
+      this.providerRegistry.setBudgetCircuitBreaker(this.executionGovernor.budgetCircuitBreaker);
+    }
     this.authorizationWorkflow = options.authorizationWorkflow || this.executionGovernor.authorizationWorkflow || authorizationWorkflow;
     this.taskSnapshotStore = options.taskSnapshotStore || null;
     this.tasks = new Map();

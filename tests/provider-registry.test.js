@@ -1,6 +1,10 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
 
+const { BudgetExceededError, HardBudgetCircuitBreaker } = require("../src/platform/costControls");
 const { ValidationError } = require("../src/platform/contracts");
 const { buildDefaultProviderRegistry } = require("../src/providers/providerRegistry");
 
@@ -89,4 +93,46 @@ test("registry health override is applied", async () => {
   const health = await registry.getProviderHealth("local");
   assert.equal(health.healthy, false);
   assert.equal(health.score, 0.1);
+});
+
+test("registry enforces hard budget circuit breaker before adapter execution", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "provider-budget-breaker-"));
+  const breaker = new HardBudgetCircuitBreaker({
+    providerProfiles: {
+      local: {
+        cost_per_1k_tokens: 1
+      }
+    },
+    dailyBudget: 10,
+    usageLedgerOptions: {
+      filePath: path.join(root, "usage.jsonl")
+    },
+    balanceStoreOptions: {
+      filePath: path.join(root, "balance.json"),
+      currency: "USD"
+    }
+  });
+  breaker.balanceStore.setBalance({
+    remaining_balance: 0,
+    actor: "tester"
+  });
+
+  const registry = buildDefaultProviderRegistry({
+    flags: buildFlags({
+      local_model_adapter_enabled: true
+    }),
+    budgetCircuitBreaker: breaker
+  });
+
+  await assert.rejects(
+    () => registry.execute({
+      provider: "local",
+      request: {
+        task_id: "task-budget",
+        trace_id: "trace-budget",
+        input: "direct provider call"
+      }
+    }),
+    BudgetExceededError
+  );
 });

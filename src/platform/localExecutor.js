@@ -38,6 +38,52 @@ function assertForbiddenPath(targetPath) {
   }
 }
 
+function assertPathReality(targetPath, options = {}) {
+  const normalized = normalizeTargetPath(targetPath);
+  const {
+    allowMissingLeaf = false,
+    requireDirectory = false,
+    requireFile = false,
+    operation = "path access"
+  } = options;
+  assertForbiddenPath(normalized);
+
+  if (fs.existsSync(normalized)) {
+    const stats = fs.statSync(normalized);
+    if (requireDirectory && !stats.isDirectory()) {
+      throw new ValidationError(`Expected directory for ${operation}: ${normalized}`);
+    }
+    if (requireFile && !stats.isFile()) {
+      throw new ValidationError(`Expected file for ${operation}: ${normalized}`);
+    }
+    return {
+      normalized_path: normalized,
+      exists: true,
+      stats
+    };
+  }
+
+  if (!allowMissingLeaf) {
+    throw new ValidationError(`Path does not exist for ${operation}: ${normalized}`);
+  }
+
+  const parentDir = path.dirname(normalized);
+  if (!fs.existsSync(parentDir)) {
+    throw new ValidationError(`Parent directory does not exist for ${operation}: ${parentDir}`);
+  }
+  const parentStats = fs.statSync(parentDir);
+  if (!parentStats.isDirectory()) {
+    throw new ValidationError(`Parent directory is not a directory for ${operation}: ${parentDir}`);
+  }
+  return {
+    normalized_path: normalized,
+    exists: false,
+    parent_dir: parentDir,
+    parent_stats: parentStats,
+    stats: null
+  };
+}
+
 function sanitizeCommandText(command, args = []) {
   return scrubSensitiveData([command, ...args].join(" "));
 }
@@ -230,10 +276,13 @@ class LocalExecutor {
       actor,
       targetPath: target_path
     });
-    const targetFile = normalizeTargetPath(target_path);
-    const parentDir = path.dirname(targetFile);
-    if (!fs.existsSync(parentDir) || !fs.statSync(parentDir).isDirectory()) {
-      throw new ValidationError(`Parent directory does not exist: ${parentDir}`);
+    const targetReality = assertPathReality(target_path, {
+      allowMissingLeaf: true,
+      operation: "write file"
+    });
+    const targetFile = targetReality.normalized_path;
+    if (targetReality.exists && targetReality.stats && targetReality.stats.isDirectory()) {
+      throw new ValidationError(`Cannot overwrite directory with file write: ${targetFile}`);
     }
     const snapshot = this.gitSafety.createSnapshot(traceId, "local-write-file");
     const checkpoint = this.stepJournal.beginStep({
@@ -290,11 +339,11 @@ class LocalExecutor {
       actor,
       targetPath: target_path
     });
-    const targetFile = normalizeTargetPath(target_path);
-    if (!fs.existsSync(targetFile)) {
-      throw new ValidationError(`Target file does not exist: ${targetFile}`);
-    }
-    fs.statSync(targetFile);
+    const targetReality = assertPathReality(target_path, {
+      requireFile: true,
+      operation: "delete file"
+    });
+    const targetFile = targetReality.normalized_path;
     const snapshot = this.gitSafety.createSnapshot(traceId, "local-delete-file");
     const checkpoint = this.stepJournal.beginStep({
       trace_id: traceId,
@@ -343,12 +392,19 @@ class LocalExecutor {
       actor,
       targetPath: destination_path
     });
-    const sourceFile = normalizeTargetPath(source_path);
-    const destinationFile = normalizeTargetPath(destination_path);
-    if (!fs.existsSync(sourceFile)) {
-      throw new ValidationError(`Source file does not exist: ${sourceFile}`);
+    const sourceReality = assertPathReality(source_path, {
+      requireFile: true,
+      operation: "move source file"
+    });
+    const destinationReality = assertPathReality(destination_path, {
+      allowMissingLeaf: true,
+      operation: "move destination file"
+    });
+    const sourceFile = sourceReality.normalized_path;
+    const destinationFile = destinationReality.normalized_path;
+    if (destinationReality.exists) {
+      throw new ValidationError(`Destination file already exists: ${destinationFile}`);
     }
-    fs.statSync(sourceFile);
     const snapshot = this.gitSafety.createSnapshot(traceId, "local-move-file");
     const checkpoint = this.stepJournal.beginStep({
       trace_id: traceId,
@@ -404,12 +460,16 @@ class LocalExecutor {
       actor,
       targetPath: cwd
     });
+    const cwdReality = assertPathReality(cwd, {
+      requireDirectory: true,
+      operation: "exec cwd"
+    });
     if (network_isolation && isNetworkSensitiveCommand(command, args)) {
       throw new ValidationError("Command is blocked by network isolation policy");
     }
     const sanitizedCommand = sanitizeCommandText(command, args);
     const child = cp.spawn(command, args, {
-      cwd,
+      cwd: cwdReality.normalized_path,
       env: network_isolation ? sanitizeEnv({ ...process.env, ...env }) : { ...process.env, ...env },
       windowsHide: true
     });
@@ -463,6 +523,7 @@ module.exports = {
   FORBIDDEN_PATHS,
   LocalExecutor,
   ResourceGuardian,
+  assertPathReality,
   assertForbiddenPath,
   isNetworkSensitiveCommand,
   sampleProcessUsage

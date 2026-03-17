@@ -51,6 +51,14 @@ const {
   validateRollbackCheckpoint,
   validateStepRecord
 } = require("./contracts");
+const {
+  BudgetExceededError,
+  HardBudgetCircuitBreaker,
+  JsonFileBalanceStore,
+  JsonlUsageLedger,
+  estimateRequestCost,
+  estimateTokens
+} = require("./costControls");
 const { DEFAULT_FLAGS, fromMapping, highRiskFlagsDisabled, loadFeatureFlags } = require("./featureFlags");
 const {
   ensureDir,
@@ -70,7 +78,7 @@ const {
 } = require("./authorizationWorkflow");
 const { JsonlStepJournal, STEP_STATUSES } = require("./checkpointJournal");
 const { GitSafetyManager, runGit } = require("./gitSafety");
-const { FORBIDDEN_PATHS, LocalExecutor, ResourceGuardian, assertForbiddenPath } = require("./localExecutor");
+const { FORBIDDEN_PATHS, LocalExecutor, ResourceGuardian, assertForbiddenPath, assertPathReality } = require("./localExecutor");
 const { JsonFilePolicyStore, BUDGET_RULE_SCOPE, PATH_RULE_SCOPE, SKILL_RULE_SCOPE } = require("./policyStore");
 const { McpRegistry } = require("./mcpRegistry");
 const {
@@ -91,6 +99,7 @@ module.exports = {
   AuthorizationRequiredError,
   AuthorizationWorkflowManager,
   BUDGET_RULE_SCOPE,
+  BudgetExceededError,
   CHECKPOINT_CREATED,
   CHECKPOINT_ID_PATTERN,
   DEFAULT_AUDIT_TYPES,
@@ -105,9 +114,12 @@ module.exports = {
   IM_COMMAND_RECEIVED,
   IM_COMMAND_ROUTED,
   INTERRUPTED_TASK_RECOVERED,
+  HardBudgetCircuitBreaker,
   JsonFileAuthorizationRequestStore,
+  JsonFileBalanceStore,
   JsonFilePolicyStore,
   JsonlStepJournal,
+  JsonlUsageLedger,
   GitSafetyManager,
   LocalExecutor,
   LOCAL_RUNNER_OPERATION_BLOCKED,
@@ -147,6 +159,7 @@ module.exports = {
   STEP_LOGGED,
   ValidationError,
   assertForbiddenPath,
+  assertPathReality,
   createChildTraceId,
   createTraceId,
   redactSensitiveData,
@@ -166,6 +179,8 @@ module.exports = {
   narrateSystemStatus,
   nowUtcIso,
   normalizePortablePath,
+  estimateRequestCost,
+  estimateTokens,
   readJsonFile,
   resolveDataPath,
   resolveDataRoot,

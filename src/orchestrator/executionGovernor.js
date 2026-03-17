@@ -5,25 +5,17 @@ const { randomUUID } = require("crypto");
 const { AuthorizationRequiredError, AuthorizationWorkflowManager } = require("../platform/authorizationWorkflow");
 const { ensureDir, resolveDataPath } = require("../platform/appPaths");
 const { ValidationError, nowUtcIso } = require("../platform/contracts");
+const {
+  BudgetExceededError,
+  HardBudgetCircuitBreaker,
+  JsonFileBalanceStore,
+  JsonlUsageLedger,
+  estimateTokens
+} = require("../platform/costControls");
 const { scrubSensitiveData } = require("../platform/sensitiveData");
-
-class BudgetExceededError extends ValidationError {
-  constructor(message, options = {}) {
-    super(message);
-    this.name = "BudgetExceededError";
-    this.code = options.code || "DAILY_BUDGET_EXCEEDED";
-    this.status = options.status || 429;
-    this.details = options.details || {};
-  }
-}
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
-}
-
-function estimateTokens(text) {
-  const length = String(text || "").trim().length;
-  return Math.max(1, Math.ceil(length / 4));
 }
 
 function normalizePrompt(input) {
@@ -127,50 +119,6 @@ function chooseModelForTier(provider, profiles = {}, tier = "pro") {
     return "claude-3-7-sonnet";
   }
   return String(profile.default_model || `${provider}-default-model`);
-}
-
-class JsonlUsageLedger {
-  constructor(options = {}) {
-    this.filePath = options.filePath || resolveDataPath("token-usage.jsonl");
-    ensureDir(path.dirname(this.filePath));
-    if (!fs.existsSync(this.filePath)) {
-      fs.writeFileSync(this.filePath, "", "utf8");
-    }
-  }
-
-  append(record) {
-    fs.appendFileSync(this.filePath, `${JSON.stringify(record)}\n`, "utf8");
-    return clone(record);
-  }
-
-  getAll() {
-    return fs.readFileSync(this.filePath, "utf8")
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map((line) => JSON.parse(line));
-  }
-
-  summarizeDay(day = nowUtcIso().slice(0, 10)) {
-    const entries = this.getAll().filter((item) => String(item.timestamp || "").startsWith(day));
-    const totals = entries.reduce((summary, item) => {
-      summary.input_tokens += Number(item.input_tokens || 0);
-      summary.output_tokens += Number(item.output_tokens || 0);
-      summary.total_tokens += Number(item.total_tokens || 0);
-      summary.estimated_cost += Number(item.estimated_cost || 0);
-      return summary;
-    }, {
-      input_tokens: 0,
-      output_tokens: 0,
-      total_tokens: 0,
-      estimated_cost: 0
-    });
-    return {
-      day,
-      entries: entries.length,
-      ...totals
-    };
-  }
 }
 
 class JsonlSemanticCacheStore {
@@ -323,11 +271,18 @@ class JsonlSelfReflectionStore {
 class ExecutionGovernor {
   constructor(options = {}) {
     this.providerProfiles = options.providerProfiles || {};
-    this.dailyBudget = Number(options.dailyBudget || process.env.DAILY_BUDGET || 10);
     this.singleTaskBudgetThreshold = Number(options.singleTaskBudgetThreshold || 0.5);
     this.contextTokenThreshold = Number(options.contextTokenThreshold || 6000);
     this.authorizationWorkflow = options.authorizationWorkflow || new AuthorizationWorkflowManager();
     this.usageLedger = options.usageLedger || new JsonlUsageLedger(options.usageLedgerOptions || {});
+    this.balanceStore = options.balanceStore || new JsonFileBalanceStore(options.balanceStoreOptions || {});
+    this.budgetCircuitBreaker = options.budgetCircuitBreaker || new HardBudgetCircuitBreaker({
+      providerProfiles: this.providerProfiles,
+      dailyBudget: options.dailyBudget,
+      usageLedger: this.usageLedger,
+      balanceStore: this.balanceStore
+    });
+    this.dailyBudget = this.budgetCircuitBreaker.dailyBudget;
     this.semanticCache = options.semanticCache || new JsonlSemanticCacheStore(options.semanticCacheOptions || {});
     this.knowledgeStore = options.knowledgeStore || new JsonlKnowledgeTransferStore(options.knowledgeStoreOptions || {});
     this.handoffSnapshotStore = options.handoffSnapshotStore || new JsonlHandoffSnapshotStore(options.handoffSnapshotStoreOptions || {});
@@ -335,15 +290,11 @@ class ExecutionGovernor {
   }
 
   estimateCost(provider, model, input) {
-    const profile = this.providerProfiles[provider] || {};
-    const per1k = Number(profile.cost_per_1k_tokens || 0.02);
-    const tokens = estimateTokens(input);
-    const totalTokens = tokens * 2;
-    return {
+    return this.budgetCircuitBreaker.estimateRequest({
+      provider,
       model,
-      total_tokens_estimate: totalTokens,
-      estimated_cost: Number(((totalTokens / 1000) * per1k).toFixed(6))
-    };
+      input
+    });
   }
 
   async prepareExecution({
@@ -395,20 +346,13 @@ class ExecutionGovernor {
     const scrubbedInput = scrubSensitiveData(outboundInput, {
       allowedRoots: [process.cwd()]
     });
-    const budget = this.estimateCost(selectedProvider, selectedModel, scrubbedInput);
-    const dailySummary = this.usageLedger.summarizeDay();
-
-    if (dailySummary.estimated_cost + budget.estimated_cost > this.dailyBudget) {
-      throw new BudgetExceededError(
-        `Daily provider budget exceeded: $${(dailySummary.estimated_cost + budget.estimated_cost).toFixed(3)} > $${this.dailyBudget.toFixed(3)}`,
-        {
-          details: {
-            current_cost: dailySummary.estimated_cost,
-            estimated_increment: budget.estimated_cost
-          }
-        }
-      );
-    }
+    const budget = this.budgetCircuitBreaker.assertRequestAllowed({
+      trace_id: task.trace_id,
+      task_id: task.task_id,
+      provider: selectedProvider,
+      model: selectedModel,
+      input: scrubbedInput
+    });
 
     if (budget.estimated_cost > this.singleTaskBudgetThreshold && metadata.budget_confirmed !== true) {
       await this.authorizationWorkflow.ensureBudgetApproved({
@@ -467,18 +411,6 @@ class ExecutionGovernor {
     result
   }) {
     const usage = result && result.usage ? result.usage : {};
-    const estimatedCost = this.estimateCost(provider, model, input).estimated_cost;
-    this.usageLedger.append({
-      trace_id: task.trace_id,
-      task_id: task.task_id,
-      provider,
-      model,
-      input_tokens: Number(usage.input_tokens || 0),
-      output_tokens: Number(usage.output_tokens || 0),
-      total_tokens: Number(usage.total_tokens || 0),
-      estimated_cost: estimatedCost,
-      timestamp: nowUtcIso()
-    });
     if (result && result.status && ["COMPLETED", "STUB_NOT_IMPLEMENTED", "CACHED"].includes(result.status)) {
       this.semanticCache.save({
         cache_id: randomUUID(),
@@ -534,6 +466,8 @@ class ExecutionGovernor {
 module.exports = {
   BudgetExceededError,
   ExecutionGovernor,
+  HardBudgetCircuitBreaker,
+  JsonFileBalanceStore,
   JsonlHandoffSnapshotStore,
   JsonlKnowledgeTransferStore,
   JsonlSelfReflectionStore,

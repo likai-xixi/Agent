@@ -37,6 +37,7 @@ const {
   normalizeApiAuthConfig
 } = require("./auth");
 const { SelfHealingSupervisor } = require("../monitoring/selfHealingSupervisor");
+const { OssHeartbeatLeaderElection } = require("../cluster/heartbeatLock");
 const {
   RBAC_ROLES,
   authorizeRequest,
@@ -161,6 +162,46 @@ function loadRuntimeDbConfig(pathValue = "config/runtime_db.json") {
     enabled: raw.enabled === true,
     db_path: String(raw.db_path || fallback.db_path)
   };
+}
+
+function createLeaderElectionManager(options = {}) {
+  const enabled = options.enabled === true || String(process.env.OSS_HEARTBEAT_LOCK_ENABLED || "").toLowerCase() === "true";
+  const hasInjectedStorage = Boolean(options.storage);
+  if (!enabled && !hasInjectedStorage) {
+    return null;
+  }
+  const accessKeyId = String(
+    options.accessKeyId
+    || process.env[options.accessKeyIdEnv || "OSS_ACCESS_KEY_ID"]
+    || ""
+  ).trim();
+  const accessKeySecret = String(
+    options.accessKeySecret
+    || process.env[options.accessKeySecretEnv || "OSS_ACCESS_KEY_SECRET"]
+    || ""
+  ).trim();
+  const endpoint = String(options.endpoint || process.env.OSS_LOCK_ENDPOINT || "").trim();
+  const bucket = String(options.bucket || process.env.OSS_LOCK_BUCKET || "").trim();
+  if (!hasInjectedStorage && (!endpoint || !bucket || !accessKeyId || !accessKeySecret)) {
+    return null;
+  }
+  return new OssHeartbeatLeaderElection({
+    storage: options.storage,
+    scope: options.scope || process.env.OSS_LOCK_SCOPE || "agent-control-plane",
+    lockKey: options.lockKey || process.env.OSS_LOCK_KEY || "cluster/leader-lock.json",
+    nodeId: options.nodeId || process.env.AGENT_NODE_ID || "",
+    capabilities: options.capabilities || {},
+    leaseTtlMs: Number(options.leaseTtlMs || process.env.OSS_LOCK_TTL_MS || 15000),
+    heartbeatIntervalMs: Number(options.heartbeatIntervalMs || process.env.OSS_LOCK_HEARTBEAT_MS || 5000),
+    oss: hasInjectedStorage ? undefined : {
+      endpoint,
+      bucket,
+      prefix: options.prefix || process.env.OSS_LOCK_PREFIX || "agent-locks",
+      accessKeyId,
+      accessKeySecret,
+      virtualHostedStyle: options.virtualHostedStyle !== false
+    }
+  });
 }
 
 function parseJsonBody(req) {
@@ -386,6 +427,7 @@ function createTaskApiServer(options = {}) {
       ? orchestrator.executionGovernor.handoffSnapshotStore
       : null
   });
+  const leaderElectionManager = options.leaderElectionManager || createLeaderElectionManager(options.leaderElectionOptions || {});
   const autoResumeResult = options.autoResumeInterrupted === false
     ? []
     : localExecutor.resumeInterruptedWork();
@@ -574,7 +616,11 @@ function createTaskApiServer(options = {}) {
           adaptive_routing_enabled: orchestrator.flags.adaptive_routing_enabled === true,
           discussion_engine_enabled: orchestrator.flags.discussion_engine_enabled === true,
           auth_enabled: authConfig.auth_enabled === true,
-          rbac_enabled: rbacConfig.rbac_enabled === true
+          rbac_enabled: rbacConfig.rbac_enabled === true,
+          leader_election: leaderElectionManager ? leaderElectionManager.getState() : null,
+          budget_status: orchestrator.executionGovernor && orchestrator.executionGovernor.budgetCircuitBreaker
+            ? orchestrator.executionGovernor.budgetCircuitBreaker.getBudgetStatus()
+            : null
         });
         return;
       }
@@ -1085,6 +1131,37 @@ function createTaskApiServer(options = {}) {
         return;
       }
 
+      if (method === "GET" && pathname === "/ops/budget") {
+        const budgetStatus = orchestrator.executionGovernor && orchestrator.executionGovernor.budgetCircuitBreaker
+          ? orchestrator.executionGovernor.budgetCircuitBreaker.getBudgetStatus()
+          : null;
+        jsonResponse(res, 200, {
+          budget: budgetStatus
+        });
+        return;
+      }
+
+      if ((method === "POST" || method === "PUT") && pathname === "/ops/budget") {
+        if (!orchestrator.executionGovernor || !orchestrator.executionGovernor.balanceStore) {
+          serverError(res, "Budget store is not configured");
+          return;
+        }
+        const body = await parseJsonBody(req);
+        const actor = resolveRequestActor(body.actor, requestIdentity, "operator", forceIdentityActor);
+        const updated = orchestrator.executionGovernor.balanceStore.setBalance({
+          remaining_balance: Object.prototype.hasOwnProperty.call(body, "remaining_balance")
+            ? body.remaining_balance
+            : null,
+          currency: body.currency || "USD",
+          reason: body.reason || "manual_budget_update",
+          actor
+        });
+        jsonResponse(res, 200, {
+          budget: updated
+        });
+        return;
+      }
+
       if (method === "GET" && pathname === "/runner/authorizations/pending") {
         const requests = orchestrator.listAuthorizationRequests("PENDING");
         jsonResponse(res, 200, {
@@ -1249,6 +1326,10 @@ function createTaskApiServer(options = {}) {
       }
 
       if (method === "POST" && pathname === "/integrations/im/commands") {
+        if (leaderElectionManager && !leaderElectionManager.canAcceptImCommands()) {
+          conflict(res, `Current node is not the elected IM leader: ${leaderElectionManager.getState().node_id}`);
+          return;
+        }
         const body = await parseJsonBody(req);
         const result = await imCommandBridge.handleIncoming({
           payload: body,
@@ -1260,6 +1341,10 @@ function createTaskApiServer(options = {}) {
       }
 
       if (method === "POST" && pathname === "/integrations/im/events") {
+        if (leaderElectionManager && !leaderElectionManager.canAcceptImCommands()) {
+          conflict(res, `Current node is not the elected IM leader: ${leaderElectionManager.getState().node_id}`);
+          return;
+        }
         const body = await parseJsonBody(req);
         if (body.command || body.request_id || body.text) {
           const result = await imCommandBridge.handleIncoming({
@@ -1342,11 +1427,18 @@ function createTaskApiServer(options = {}) {
       server.once("error", reject);
       server.listen(port, host, () => {
         server.off("error", reject);
-        const address = server.address();
-        resolve({
-          host,
-          port: typeof address === "object" && address ? address.port : port
-        });
+        Promise.resolve()
+          .then(() => leaderElectionManager ? leaderElectionManager.start() : null)
+          .then(() => {
+            const address = server.address();
+            resolve({
+              host,
+              port: typeof address === "object" && address ? address.port : port
+            });
+          })
+          .catch((err) => {
+            server.close(() => reject(err));
+          });
       });
     });
   }
@@ -1367,12 +1459,16 @@ function createTaskApiServer(options = {}) {
             managedRuntimeDatabase = null;
           }
         }
-        resolve();
+        Promise.resolve()
+          .then(() => leaderElectionManager ? leaderElectionManager.stop() : null)
+          .then(() => resolve())
+          .catch(reject);
       });
     });
   }
 
   return {
+    leaderElectionManager,
     orchestrator,
     localExecutor,
     imCommandBridge,
@@ -1398,5 +1494,6 @@ if (require.main === module) {
 }
 
 module.exports = {
+  createLeaderElectionManager,
   createTaskApiServer
 };
