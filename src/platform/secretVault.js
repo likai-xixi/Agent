@@ -7,7 +7,7 @@ const { resolveDataPath } = require("./appPaths");
 
 const DEFAULT_SECRET_VAULT_PATH = resolveDataPath("secret-vault.json");
 const DEFAULT_SECRET_AUDIT_PATH = resolveDataPath("secret-vault-audit.jsonl");
-const CURRENT_VAULT_VERSION = 2;
+const CURRENT_VAULT_VERSION = 3;
 const LEGACY_VAULT_VERSION = 1;
 const DEFAULT_KDF_CONFIG = Object.freeze({
   algorithm: "pbkdf2-sha512",
@@ -91,13 +91,16 @@ function encryptSecret(secretValue, masterKey, kdfConfig) {
   const key = deriveEncryptionKey(masterKey, kdfConfig);
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
-  let ciphertext = cipher.update(String(secretValue), "utf8", "base64");
-  ciphertext += cipher.final("base64");
-  const tag = cipher.getAuthTag().toString("base64");
+  const ciphertext = Buffer.concat([
+    cipher.update(String(secretValue), "utf8"),
+    cipher.final()
+  ]);
+  const authTag = cipher.getAuthTag();
+  const sealedPackage = Buffer.concat([authTag, ciphertext]).toString("base64");
   return {
-    ciphertext,
+    package: sealedPackage,
     iv: iv.toString("base64"),
-    tag
+    tag_length: authTag.length
   };
 }
 
@@ -106,8 +109,18 @@ function decryptSecret(payload, masterKey, kdfConfig = null) {
     ? deriveEncryptionKey(masterKey, kdfConfig)
     : legacyDeriveEncryptionKey(masterKey);
   const decipher = crypto.createDecipheriv("aes-256-gcm", key, Buffer.from(String(payload.iv || ""), "base64"));
-  decipher.setAuthTag(Buffer.from(String(payload.tag || ""), "base64"));
-  let plaintext = decipher.update(String(payload.ciphertext || ""), "base64", "utf8");
+  let plaintext = "";
+  if (payload.package) {
+    const packaged = Buffer.from(String(payload.package || ""), "base64");
+    const tagLength = Number(payload.tag_length || 16);
+    const authTag = packaged.subarray(0, tagLength);
+    const ciphertext = packaged.subarray(tagLength);
+    decipher.setAuthTag(authTag);
+    plaintext = decipher.update(ciphertext, undefined, "utf8");
+  } else {
+    decipher.setAuthTag(Buffer.from(String(payload.tag || ""), "base64"));
+    plaintext = decipher.update(String(payload.ciphertext || ""), "base64", "utf8");
+  }
   plaintext += decipher.final("utf8");
   return plaintext;
 }
@@ -134,12 +147,22 @@ class JsonFileSecretVault {
   }
 
   maybeUpgradeLegacyStore(store) {
-    if (store.version >= CURRENT_VAULT_VERSION && store.kdf) {
+    const sourceKdf = store.kdf ? normalizeKdfConfig(store.kdf) : null;
+    const needsPackageUpgrade = Object.values(store.entries || {}).some((entry) => !entry.package);
+    if (store.version >= CURRENT_VAULT_VERSION && sourceKdf && !needsPackageUpgrade) {
       return store;
     }
-    const upgraded = this.createEmptyStore();
+    const upgraded = sourceKdf
+      ? {
+          version: CURRENT_VAULT_VERSION,
+          kdf: sourceKdf,
+          key_fingerprint: hashKeyFingerprint(this.masterKey, sourceKdf),
+          updated_at: new Date().toISOString(),
+          entries: {}
+        }
+      : this.createEmptyStore();
     for (const [name, entry] of Object.entries(store.entries || {})) {
-      const plaintext = decryptSecret(entry, this.masterKey, null);
+      const plaintext = decryptSecret(entry, this.masterKey, sourceKdf);
       upgraded.entries[name] = {
         ...encryptSecret(plaintext, this.masterKey, upgraded.kdf),
         name,
@@ -177,6 +200,9 @@ class JsonFileSecretVault {
       });
     }
     raw.kdf = normalizeKdfConfig(raw.kdf);
+    if (Object.values(raw.entries).some((entry) => !entry.package)) {
+      return this.maybeUpgradeLegacyStore(raw);
+    }
     raw.key_fingerprint = String(raw.key_fingerprint || hashKeyFingerprint(this.masterKey, raw.kdf));
     return raw;
   }

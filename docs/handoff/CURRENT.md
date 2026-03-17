@@ -1,8 +1,8 @@
 # Handoff Snapshot
 
-- Updated At: `2026-03-17T02:51:23Z`
+- Updated At: `2026-03-17T03:31:03Z`
 - Current Status: `done`
-- Current STEP_ID: `STEP-20260317-003`
+- Current STEP_ID: `STEP-20260317-004`
 
 ## Blockers
 
@@ -10,12 +10,12 @@
 
 ## Next Top 3
 
-1. Commit the hardening pass and capture a checkpoint after governance gates pass.
-2. Complete checkpoint metadata with commit hash/tag.
-3. Run governance gate and unit tests.
+1. Publish the checkpointed hardening pass to GitHub via API direct-sync if requested.
+2. Monitor the first encrypted backup cycle with a configured digital soul master key.
+3. Validate CLUSTER_SCOPE configuration across participating nodes before enabling multi-node execution.
 
 ## Acceptance Criteria
 
-1. API auth and RBAC default to deny and enter lockdown when disabled or misconfigured.
-2. Provider secret reads/writes require SUPER_ADMIN and MFA.
-3. Secret vault encrypts with PBKDF2-derived AES-256-GCM keys and upgrades legacy stores in place.
+1. Git snapshotting only stages explicit allowlisted skill and encrypted vault assets, and sensitive content blocks are auditable.
+2. OSS leader election refuses cross-scope participation and continues to use conditional writes for unique master ownership.
+3. Portable backups and vault payloads are encrypted with PBKDF2-derived AES-256-GCM packages before touching disk.

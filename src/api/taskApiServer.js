@@ -186,10 +186,18 @@ function createLeaderElectionManager(options = {}) {
   if (!hasInjectedStorage && (!endpoint || !bucket || !accessKeyId || !accessKeySecret)) {
     return null;
   }
+  const clusterScope = String(
+    options.clusterScope
+    || process.env.CLUSTER_SCOPE
+    || options.scope
+    || process.env.OSS_LOCK_SCOPE
+    || "agent-control-plane"
+  ).trim();
   return new OssHeartbeatLeaderElection({
     storage: options.storage,
-    scope: options.scope || process.env.OSS_LOCK_SCOPE || "agent-control-plane",
-    lockKey: options.lockKey || process.env.OSS_LOCK_KEY || "cluster/leader-lock.json",
+    scope: clusterScope,
+    clusterScope,
+    lockKey: options.lockKey || process.env.OSS_LOCK_KEY || "cluster/active_master.lock",
     nodeId: options.nodeId || process.env.AGENT_NODE_ID || "",
     capabilities: options.capabilities || {},
     leaseTtlMs: Number(options.leaseTtlMs || process.env.OSS_LOCK_TTL_MS || 15000),

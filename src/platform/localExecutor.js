@@ -12,54 +12,77 @@ const { GitSafetyManager } = require("./gitSafety");
 const { TASK_STATES } = require("../orchestrator/taskStateMachine");
 const { scrubSensitiveData } = require("./sensitiveData");
 const { ensureTraceId } = require("./trace");
+const {
+  createPathPrefixMatcher,
+  normalizeComparisonPath,
+  resolvePhysicalPath,
+  startsWithPathPrefix
+} = require("./physicalPaths");
 
-const FORBIDDEN_ZONES = Object.freeze([
+const FORBIDDEN_PATH_ZONES = Object.freeze([
   "C:\\Windows",
   "C:\\System32",
   "C:\\Users\\Administrator",
   "C:\\Program Files",
-  "C:\\Program Files (x86)",
+  "C:\\Program Files (x86)"
+].map((item) => path.resolve(String(item)).toLowerCase()));
+const RAW_FORBIDDEN_PREFIXES = Object.freeze([
   "\\Device\\",
   "\\\\.\\"
 ].map((item) => String(item).toLowerCase()));
+const FORBIDDEN_ZONES = Object.freeze([
+  ...FORBIDDEN_PATH_ZONES,
+  ...RAW_FORBIDDEN_PREFIXES
+]);
 const FORBIDDEN_PATHS = FORBIDDEN_ZONES;
 const DEFAULT_WORKSPACE_ROOT = path.resolve(process.env.STORAGE_PATH || "./data");
+const SATELLITE_PRIORITY = os.constants && os.constants.priority && Number.isInteger(os.constants.priority.PRIORITY_LOWEST)
+  ? os.constants.priority.PRIORITY_LOWEST
+  : 19;
 
 function normalizeTargetPath(targetPath) {
   return path.resolve(String(targetPath || ""));
-}
-
-function normalizeComparisonPath(targetPath) {
-  return normalizeTargetPath(targetPath).toLowerCase();
 }
 
 function normalizeRawPath(targetPath) {
   return String(targetPath || "").trim().toLowerCase();
 }
 
-function createPathPrefixMatcher(rootPath) {
-  const normalizedRoot = normalizeComparisonPath(rootPath).replace(/[\\/]+$/, "");
-  return {
-    exact: normalizedRoot,
-    nested: `${normalizedRoot}${path.sep.toLowerCase()}`
-  };
-}
-
 function isWithinRoot(targetPath, rootPath) {
   if (!rootPath) {
     return false;
   }
-  const normalizedTarget = normalizeComparisonPath(targetPath);
-  const matcher = createPathPrefixMatcher(rootPath);
-  return normalizedTarget === matcher.exact || normalizedTarget.startsWith(matcher.nested);
+  const physicalTarget = resolvePhysicalPath(targetPath).physical_path;
+  const physicalRoot = resolvePhysicalPath(rootPath).physical_path;
+  return startsWithPathPrefix(physicalTarget, physicalRoot);
 }
 
 function isInForbiddenZone(targetPath) {
-  const normalizedTarget = normalizeComparisonPath(targetPath);
+  const physicalTarget = resolvePhysicalPath(targetPath).physical_path;
+  const normalizedTarget = normalizeComparisonPath(physicalTarget);
   const rawTarget = normalizeRawPath(targetPath);
-  return FORBIDDEN_ZONES.some((zone) => (
-    normalizedTarget.startsWith(zone) || rawTarget.startsWith(zone)
-  ));
+  if (RAW_FORBIDDEN_PREFIXES.some((prefix) => rawTarget.startsWith(prefix))) {
+    return true;
+  }
+  return FORBIDDEN_PATH_ZONES.some((zone) => {
+    const matcher = createPathPrefixMatcher(zone);
+    return normalizedTarget === matcher.exact || normalizedTarget.startsWith(matcher.nested);
+  });
+}
+
+function applySatellitePriority(prioritySetter, pid, nodeAssignment) {
+  if (String(nodeAssignment || "").toUpperCase() !== "SATELLITE") {
+    return false;
+  }
+  if (!Number.isInteger(pid) || pid <= 0 || typeof prioritySetter !== "function") {
+    return false;
+  }
+  try {
+    prioritySetter(pid, SATELLITE_PRIORITY);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 class LocalSecurityGatewayError extends ValidationError {
@@ -89,25 +112,28 @@ function assertForbiddenPath(targetPath) {
 }
 
 function assertPathReality(targetPath, options = {}) {
-  const normalized = normalizeTargetPath(targetPath);
+  const resolved = resolvePhysicalPath(targetPath);
+  const normalized = resolved.absolute_path;
+  const physicalPath = resolved.physical_path;
   const {
     allowMissingLeaf = false,
     requireDirectory = false,
     requireFile = false,
     operation = "path access"
   } = options;
-  assertForbiddenPath(normalized);
+  assertForbiddenPath(physicalPath);
 
   if (fs.existsSync(normalized)) {
     const stats = fs.statSync(normalized);
     if (requireDirectory && !stats.isDirectory()) {
-      throw new ValidationError(`Expected directory for ${operation}: ${normalized}`);
+      throw new ValidationError(`Expected directory for ${operation}: ${physicalPath}`);
     }
     if (requireFile && !stats.isFile()) {
-      throw new ValidationError(`Expected file for ${operation}: ${normalized}`);
+      throw new ValidationError(`Expected file for ${operation}: ${physicalPath}`);
     }
     return {
       normalized_path: normalized,
+      physical_path: physicalPath,
       exists: true,
       stats
     };
@@ -116,10 +142,10 @@ function assertPathReality(targetPath, options = {}) {
   if (!allowMissingLeaf) {
     throw new LocalSecurityGatewayError(
       "PHYSICAL_CHECK_FAILED",
-      `AI hallucinated a missing path during ${operation}: ${normalized}`,
+      `AI hallucinated a missing path during ${operation}: ${physicalPath}`,
       {
         details: {
-          target_path: normalized,
+          target_path: physicalPath,
           operation
         }
       }
@@ -130,10 +156,10 @@ function assertPathReality(targetPath, options = {}) {
   if (!fs.existsSync(parentDir)) {
     throw new LocalSecurityGatewayError(
       "PHYSICAL_CHECK_FAILED",
-      `Parent directory does not exist for ${operation}: ${parentDir}`,
+      `Parent directory does not exist for ${operation}: ${path.dirname(physicalPath)}`,
       {
         details: {
-          parent_dir: parentDir,
+          parent_dir: path.dirname(physicalPath),
           operation
         }
       }
@@ -143,10 +169,10 @@ function assertPathReality(targetPath, options = {}) {
   if (!parentStats.isDirectory()) {
     throw new LocalSecurityGatewayError(
       "PHYSICAL_CHECK_FAILED",
-      `Parent directory is not a directory for ${operation}: ${parentDir}`,
+      `Parent directory is not a directory for ${operation}: ${path.dirname(physicalPath)}`,
       {
         details: {
-          parent_dir: parentDir,
+          parent_dir: path.dirname(physicalPath),
           operation
         }
       }
@@ -154,8 +180,9 @@ function assertPathReality(targetPath, options = {}) {
   }
   return {
     normalized_path: normalized,
+    physical_path: physicalPath,
     exists: false,
-    parent_dir: parentDir,
+    parent_dir: path.dirname(physicalPath),
     parent_stats: parentStats,
     stats: null
   };
@@ -280,17 +307,35 @@ class ResourceGuardian {
 class LocalExecutor {
   constructor(options = {}) {
     this.workspaceRoot = path.resolve(options.workspaceRoot || DEFAULT_WORKSPACE_ROOT);
-    this.workspaceRootComparison = normalizeComparisonPath(this.workspaceRoot);
+    this.workspaceRootPhysical = resolvePhysicalPath(this.workspaceRoot).physical_path;
+    this.workspaceRootComparison = normalizeComparisonPath(this.workspaceRootPhysical);
     this.authorizationWorkflow = options.authorizationWorkflow || new AuthorizationWorkflowManager({
       notifier: options.notifier
     });
+    this.stepJournal = options.stepJournal || new JsonlStepJournal(options.stepJournalOptions || {});
     this.gitSafety = options.gitSafety || new GitSafetyManager({
       cwd: this.workspaceRoot,
-      enabled: options.gitSafetyEnabled !== false
+      enabled: options.gitSafetyEnabled !== false,
+      alertHandler: ({ trace_id, findings = [], reason = "", staged_paths = [] }) => {
+        this.appendSecurityEvidence({
+          trace_id: ensureTraceId(trace_id, "runner"),
+          actor: "git-safety",
+          command: reason || "git-snapshot",
+          stage: "git_sensitive_scan_blocked",
+          status: STEP_STATUSES.FAILED,
+          target_path: this.workspaceRoot,
+          metadata: {
+            code: "SENSITIVE_SYNC_BLOCKED",
+            findings,
+            staged_paths
+          }
+        });
+      }
     });
-    this.stepJournal = options.stepJournal || new JsonlStepJournal(options.stepJournalOptions || {});
     this.resourceGuardian = options.resourceGuardian || new ResourceGuardian(options.resourceGuardianOptions || {});
     this.taskStateUpdater = typeof options.taskStateUpdater === "function" ? options.taskStateUpdater : null;
+    this.nodeAssignment = String(options.nodeAssignment || process.env.AGENT_NODE_ASSIGNMENT || "MASTER").trim().toUpperCase();
+    this.prioritySetter = typeof options.prioritySetter === "function" ? options.prioritySetter : os.setPriority;
   }
 
   setTaskStateUpdater(taskStateUpdater) {
@@ -469,17 +514,19 @@ class LocalExecutor {
     allowMissingLeaf = false
   }) {
     const traceId = ensureTraceId(trace_id, "runner");
-    const absoluteTarget = normalizeTargetPath(targetPath);
-    const normalizedTarget = normalizeComparisonPath(targetPath);
+    const resolvedPath = resolvePhysicalPath(targetPath);
+    const absoluteTarget = resolvedPath.absolute_path;
+    const physicalTarget = resolvedPath.physical_path;
+    const normalizedTarget = normalizeComparisonPath(physicalTarget);
     const normalizedCommand = String(command || "").toLowerCase();
 
-    if (isInForbiddenZone(absoluteTarget)) {
+    if (isInForbiddenZone(physicalTarget)) {
       this.appendSecurityEvidence({
         trace_id: traceId,
         task_id,
         actor,
         command,
-        target_path: absoluteTarget,
+        target_path: physicalTarget,
         stage: "forbidden_zone_blocked",
         status: STEP_STATUSES.FAILED,
         metadata: {
@@ -488,23 +535,23 @@ class LocalExecutor {
       });
       throw new LocalSecurityGatewayError(
         "SECURITY_VIOLATION",
-        `AI attempted to access a protected system path: ${absoluteTarget}`,
+        `AI attempted to access a protected system path: ${physicalTarget}`,
         {
           status: 403,
           details: {
-            target_path: absoluteTarget
+            target_path: physicalTarget
           }
         }
       );
     }
 
-    if (requireExisting && !fs.existsSync(absoluteTarget) && !normalizedCommand.includes("mkdir")) {
+    if (requireExisting && !resolvedPath.exists && !normalizedCommand.includes("mkdir")) {
       this.appendSecurityEvidence({
         trace_id: traceId,
         task_id,
         actor,
         command,
-        target_path: absoluteTarget,
+        target_path: physicalTarget,
         stage: "physical_check_failed",
         status: STEP_STATUSES.FAILED,
         metadata: {
@@ -513,10 +560,10 @@ class LocalExecutor {
       });
       throw new LocalSecurityGatewayError(
         "PHYSICAL_CHECK_FAILED",
-        `AI hallucinated that a path exists when it does not: ${absoluteTarget}`,
+        `AI hallucinated that a path exists when it does not: ${physicalTarget}`,
         {
           details: {
-            target_path: absoluteTarget
+            target_path: physicalTarget
           }
         }
       );
@@ -536,7 +583,7 @@ class LocalExecutor {
         task_id,
         actor,
         command,
-        target_path: absoluteTarget,
+        target_path: physicalTarget,
         stage: "physical_check_failed",
         status: STEP_STATUSES.FAILED,
         metadata: {
@@ -547,18 +594,17 @@ class LocalExecutor {
       throw error;
     }
 
-    const decision = this.authorizationWorkflow.policyStore.isPathAllowed(absoluteTarget, {
-      workspaceRoot: this.workspaceRoot
+    const decision = this.authorizationWorkflow.policyStore.isPathAllowed(physicalTarget, {
+      workspaceRoot: this.workspaceRootPhysical
     });
-    const isInsideWorkspace = normalizedTarget === this.workspaceRootComparison
-      || normalizedTarget.startsWith(`${this.workspaceRootComparison}${path.sep.toLowerCase()}`);
+    const isInsideWorkspace = startsWithPathPrefix(physicalTarget, this.workspaceRootPhysical);
     if (!isInsideWorkspace && !decision.allowed) {
       await this.requestUserConsent({
         trace_id: traceId,
         task_id,
         actor,
         command,
-        absoluteTarget
+        absoluteTarget: physicalTarget
       });
     }
     if (decision.allowed && decision.rule && decision.rule.mode === "single") {
@@ -566,7 +612,8 @@ class LocalExecutor {
     }
     return {
       trace_id: traceId,
-      absolute_target: absoluteTarget,
+      absolute_target: physicalTarget,
+      requested_target: absoluteTarget,
       normalized_target: normalizedTarget,
       reality
     };
@@ -641,6 +688,8 @@ class LocalExecutor {
           stdout: scrubSensitiveData(String(stdout || "")),
           stderr: scrubSensitiveData(String(stderr || "")),
           network_isolation,
+          node_assignment: this.nodeAssignment,
+          priority_applied: priorityApplied,
           resource_limits: {
             cpu_ratio: 0.3,
             memory_mb: 1024,
@@ -655,6 +704,7 @@ class LocalExecutor {
         }
         resolve(payload);
       });
+      const priorityApplied = applySatellitePriority(this.prioritySetter, child.pid, this.nodeAssignment);
       const guardian = this.resourceGuardian.watch(child, traceId);
       child.on("error", (error) => {
         guardian.stop();
@@ -739,7 +789,7 @@ class LocalExecutor {
     if (targetValidation.reality.exists && targetValidation.reality.stats && targetValidation.reality.stats.isDirectory()) {
       throw new ValidationError(`Cannot overwrite directory with file write: ${targetFile}`);
     }
-    const snapshot = this.gitSafety.createSnapshot(traceId, "local-write-file");
+    const snapshot = this.gitSafety.createSnapshot(traceId, "local-write-file", [targetFile]);
     const checkpoint = this.stepJournal.beginStep({
       trace_id: traceId,
       task_id,
@@ -798,7 +848,7 @@ class LocalExecutor {
       requireExisting: true
     });
     const targetFile = targetValidation.absolute_target;
-    const snapshot = this.gitSafety.createSnapshot(traceId, "local-delete-file");
+    const snapshot = this.gitSafety.createSnapshot(traceId, "local-delete-file", [targetFile]);
     const checkpoint = this.stepJournal.beginStep({
       trace_id: traceId,
       task_id,
@@ -856,7 +906,7 @@ class LocalExecutor {
     if (destinationValidation.reality.exists) {
       throw new ValidationError(`Destination file already exists: ${destinationFile}`);
     }
-    const snapshot = this.gitSafety.createSnapshot(traceId, "local-move-file");
+    const snapshot = this.gitSafety.createSnapshot(traceId, "local-move-file", [sourceFile, destinationFile]);
     const checkpoint = this.stepJournal.beginStep({
       trace_id: traceId,
       task_id,

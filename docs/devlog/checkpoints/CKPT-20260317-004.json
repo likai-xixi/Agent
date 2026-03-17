@@ -1,0 +1,25 @@
+{
+  "checkpoint_id": "CKPT-20260317-004",
+  "step_id": "STEP-20260317-004",
+  "git_commit": "checkpoint/CKPT-20260317-004",
+  "git_tag": "checkpoint/CKPT-20260317-004",
+  "db_down_migration": "N/A",
+  "config_rollback": "git checkout HEAD~1 -- docs/devlog/STEP-20260317-004.md docs/devlog/checkpoints/CKPT-20260317-004.json docs/handoff/AUDIT-MAINTENANCE-LAST.json docs/handoff/CURRENT.md docs/handoff/DRILL-LAST.json docs/handoff/READINESS-LAST.json docs/handoff/RETENTION-LAST.json scripts/deployment-readiness.js scripts/load-test.js src/api/taskApiServer.js src/cluster/heartbeatLock.js src/discussion/discussionEngine.js src/discussion/index.js src/discussion/promptBuilder.js src/monitoring/selfHealingSupervisor.js src/orchestrator/executionGovernor.js src/platform/digitalSoulBackup.js src/platform/gitSafety.js src/platform/localExecutor.js src/platform/mcpRegistry.js src/platform/physicalPaths.js src/platform/policyStore.js src/platform/secretVault.js tests/discussion-engine.test.js tests/execution-governor.test.js tests/git-safety.test.js tests/heartbeat-lock.test.js tests/local-executor.test.js tests/secret-vault.test.js tests/self-healing-supervisor.test.js tests/skills-and-mcp.test.js",
+  "health_checks": [
+    "node scripts/verify-governance.js",
+    "npm test",
+    "npm run drill:readiness",
+    "npm run drill:continuity",
+    "npm run test:load",
+    "node --test tests/git-safety.test.js",
+    "node --test tests/heartbeat-lock.test.js",
+    "node --test tests/secret-vault.test.js",
+    "node --test tests/self-healing-supervisor.test.js",
+    "node --test tests/discussion-engine.test.js",
+    "node --test tests/local-executor.test.js",
+    "node --test tests/skills-and-mcp.test.js",
+    "node --test tests/execution-governor.test.js",
+    "node --test tests/deployment-readiness.test.js"
+  ],
+  "created_at": "2026-03-17T03:31:03Z"
+}

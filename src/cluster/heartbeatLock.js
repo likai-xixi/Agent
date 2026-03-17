@@ -45,8 +45,9 @@ function isLeaseExpired(lease, now = Date.now()) {
 class OssHeartbeatLeaderElection {
   constructor(options = {}) {
     this.storage = options.storage || new OssObjectStorageClient(options.oss || {});
-    this.lockKey = String(options.lockKey || "cluster/leader-lock.json");
+    this.lockKey = String(options.lockKey || "cluster/active_master.lock");
     this.scope = String(options.scope || "agent-control-plane");
+    this.clusterScope = String(options.clusterScope || process.env.CLUSTER_SCOPE || this.scope);
     this.nodeId = String(options.nodeId || defaultNodeId());
     this.leaseTtlMs = Number(options.leaseTtlMs || 15000);
     this.heartbeatIntervalMs = Number(options.heartbeatIntervalMs || 5000);
@@ -57,6 +58,7 @@ class OssHeartbeatLeaderElection {
     this.state = {
       node_id: this.nodeId,
       scope: this.scope,
+      cluster_scope: this.clusterScope,
       assignment: LOCK_ROLES.SATELLITE,
       is_leader: false,
       last_error: "",
@@ -69,7 +71,9 @@ class OssHeartbeatLeaderElection {
     const now = Date.now();
     return {
       lease_id: randomUUID(),
+      lock_key: this.lockKey,
       scope: this.scope,
+      cluster_scope: this.clusterScope,
       node_id: this.nodeId,
       assignment: LOCK_ROLES.MASTER,
       capabilities: this.capabilities,
@@ -111,8 +115,37 @@ class OssHeartbeatLeaderElection {
     return this.state.is_leader === true;
   }
 
+  ensureClusterScopeMatch() {
+    if (this.scope === this.clusterScope) {
+      return true;
+    }
+    this.currentLease = null;
+    this.updateState({
+      assignment: LOCK_ROLES.SATELLITE,
+      is_leader: false,
+      last_error: `CLUSTER_SCOPE_MISMATCH: lock scope ${this.scope} != local scope ${this.clusterScope}`,
+      holder: null
+    });
+    return false;
+  }
+
   async acquire() {
+    if (!this.ensureClusterScopeMatch()) {
+      return this.getState();
+    }
     const current = await this.readLease();
+    const currentScope = current && current.data
+      ? String(current.data.cluster_scope || current.data.scope || "")
+      : "";
+    if (currentScope && currentScope !== this.clusterScope) {
+      this.currentLease = null;
+      return this.updateState({
+        assignment: LOCK_ROLES.SATELLITE,
+        is_leader: false,
+        holder: current.data,
+        last_error: `CLUSTER_SCOPE_CONFLICT: remote scope ${currentScope} != local scope ${this.clusterScope}`
+      });
+    }
     if (current && current.data && current.data.node_id !== this.nodeId && !isLeaseExpired(current.data)) {
       this.currentLease = null;
       return this.updateState({
@@ -127,9 +160,7 @@ class OssHeartbeatLeaderElection {
       : 1;
     const nextLease = this.buildLease(nextVersion);
     try {
-      const write = current
-        ? await this.storage.putJson(this.lockKey, nextLease, { ifMatch: current.etag })
-        : await this.storage.putJson(this.lockKey, nextLease, { ifNoneMatch: "*" });
+      const write = await this.writeLeaseCas(nextLease, current);
       this.currentLease = {
         data: nextLease,
         etag: write.etag
@@ -155,6 +186,9 @@ class OssHeartbeatLeaderElection {
   }
 
   async renew() {
+    if (!this.ensureClusterScopeMatch()) {
+      return this.getState();
+    }
     if (!this.currentLease || !this.currentLease.data) {
       return this.acquire();
     }
@@ -165,9 +199,7 @@ class OssHeartbeatLeaderElection {
       version: Number(this.currentLease.data.version || 1) + 1
     };
     try {
-      const write = await this.storage.putJson(this.lockKey, nextLease, {
-        ifMatch: this.currentLease.etag
-      });
+      const write = await this.writeLeaseCas(nextLease, this.currentLease);
       this.currentLease = {
         data: nextLease,
         etag: write.etag
@@ -194,10 +226,23 @@ class OssHeartbeatLeaderElection {
   }
 
   async tick() {
+    if (!this.ensureClusterScopeMatch()) {
+      return this.getState();
+    }
     try {
       const current = await this.readLease();
       if (!current || !current.data) {
         return this.acquire();
+      }
+      const currentScope = String(current.data.cluster_scope || current.data.scope || "");
+      if (currentScope && currentScope !== this.clusterScope) {
+        this.currentLease = null;
+        return this.updateState({
+          assignment: LOCK_ROLES.SATELLITE,
+          is_leader: false,
+          holder: current.data,
+          last_error: `CLUSTER_SCOPE_CONFLICT: remote scope ${currentScope} != local scope ${this.clusterScope}`
+        });
       }
       if (current.data.node_id === this.nodeId) {
         this.currentLease = current;
@@ -221,6 +266,17 @@ class OssHeartbeatLeaderElection {
         last_error: error && error.message ? error.message : "LEADER_ELECTION_FAILED"
       });
     }
+  }
+
+  async writeLeaseCas(nextLease, currentLease = null) {
+    if (currentLease && currentLease.etag) {
+      return this.storage.putJson(this.lockKey, nextLease, {
+        ifMatch: currentLease.etag
+      });
+    }
+    return this.storage.putJson(this.lockKey, nextLease, {
+      ifNoneMatch: "*"
+    });
   }
 
   async start() {

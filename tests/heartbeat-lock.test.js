@@ -16,6 +16,7 @@ class InMemoryObjectStore {
   constructor() {
     this.record = null;
     this.version = 0;
+    this.lastPutOptions = null;
   }
 
   async getJson() {
@@ -29,6 +30,7 @@ class InMemoryObjectStore {
   }
 
   async putJson(_key, payload, options = {}) {
+    this.lastPutOptions = { ...options };
     if (options.ifNoneMatch === "*" && this.record) {
       throw new ObjectStoreConflictError("exists");
     }
@@ -88,6 +90,52 @@ test("heartbeat leader election hands over leadership after lease expiry", async
   const takeover = await follower.tick();
   assert.equal(takeover.is_leader, true);
   assert.equal(takeover.holder.node_id, "node-satellite");
+  assert.equal(storage.lastPutOptions.ifMatch, "etag-1");
+});
+
+test("heartbeat leader election refuses to participate when cluster scope mismatches", async () => {
+  const storage = new InMemoryObjectStore();
+  const node = new OssHeartbeatLeaderElection({
+    storage,
+    nodeId: "node-mismatch",
+    scope: "prod-cluster",
+    clusterScope: "staging-cluster"
+  });
+
+  const state = await node.tick();
+  assert.equal(state.is_leader, false);
+  assert.equal(state.assignment, "SATELLITE");
+  assert.equal(state.last_error.includes("CLUSTER_SCOPE_MISMATCH"), true);
+  assert.equal(storage.record, null);
+});
+
+test("heartbeat leader election rejects remote lock from different cluster scope", async () => {
+  const storage = new InMemoryObjectStore();
+  storage.record = {
+    etag: "etag-remote",
+    data: {
+      lease_id: "lease-remote",
+      scope: "prod-cluster",
+      cluster_scope: "prod-cluster",
+      node_id: "node-remote",
+      last_heartbeat_at: new Date().toISOString(),
+      lease_expires_at: new Date(Date.now() + 60_000).toISOString(),
+      version: 1
+    }
+  };
+
+  const node = new OssHeartbeatLeaderElection({
+    storage,
+    nodeId: "node-local",
+    scope: "staging-cluster",
+    clusterScope: "staging-cluster"
+  });
+
+  const state = await node.tick();
+  assert.equal(state.is_leader, false);
+  assert.equal(state.assignment, "SATELLITE");
+  assert.equal(state.last_error.includes("CLUSTER_SCOPE_CONFLICT"), true);
+  assert.equal(state.holder.node_id, "node-remote");
 });
 
 test("buildOssAuthorizationHeader produces OSS-signed header", () => {

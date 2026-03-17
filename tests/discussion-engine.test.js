@@ -20,3 +20,19 @@ test("DiscussionEngine returns quorum decision and stores history", () => {
   assert.equal(latest.discussion_id, result.discussion_id);
 });
 
+test("DiscussionEngine strips INNER_MONOLOGUE blocks from shared prompts", () => {
+  const engine = new DiscussionEngine();
+  const result = engine.run({
+    task: {
+      task_id: "task-2",
+      trace_id: "trace-2",
+      task_type: "analysis"
+    },
+    prompt: "Visible summary\n[INNER_MONOLOGUE]private chain of thought[/INNER_MONOLOGUE]\nFinal instruction",
+    quorum: 2
+  });
+
+  assert.equal(result.prompt.includes("INNER_MONOLOGUE"), false);
+  assert.equal(result.prompt.includes("private chain of thought"), false);
+  assert.equal(result.prompt.includes("Visible summary"), true);
+});

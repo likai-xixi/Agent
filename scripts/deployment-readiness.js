@@ -17,6 +17,21 @@ const DEFAULT_COMMANDS = Object.freeze([
   "npm run test:load",
   "npm run audit:maintenance"
 ]);
+const SCRIPT_API_TOKEN = "readiness-static-token";
+const SCRIPT_AUTH_CONFIG = Object.freeze({
+  auth_enabled: true,
+  static_tokens: [
+    {
+      token: SCRIPT_API_TOKEN,
+      subject: "readiness-runner",
+      roles: ["task_admin", "read_only_auditor"],
+      mfa_verified: true
+    }
+  ]
+});
+const SCRIPT_AUTH_HEADERS = Object.freeze({
+  Authorization: `Bearer ${SCRIPT_API_TOKEN}`
+});
 
 function parseArgs(argv) {
   const args = {};
@@ -83,9 +98,9 @@ function summarizeCommandCheck(check, maxLines = 8) {
   return lines.slice(lines.length - maxLines).join("\n");
 }
 
-function requestJson(url, timeoutMs = 5000) {
+function requestJson(url, timeoutMs = 5000, headers = {}) {
   return new Promise((resolve, reject) => {
-    const req = http.get(url, (res) => {
+    const req = http.get(url, { headers }, (res) => {
       let raw = "";
       res.on("data", (chunk) => {
         raw += chunk.toString("utf8");
@@ -120,13 +135,14 @@ async function runApiSmokeCheck() {
   const app = createTaskApiServer({
     orchestrator,
     host: "127.0.0.1",
-    port: 0
+    port: 0,
+    authConfig: SCRIPT_AUTH_CONFIG
   });
 
   const { port } = await app.start();
   try {
-    const health = await requestJson(`http://127.0.0.1:${port}/health`);
-    const integrity = await requestJson(`http://127.0.0.1:${port}/audit/integrity`);
+    const health = await requestJson(`http://127.0.0.1:${port}/health`, 5000, SCRIPT_AUTH_HEADERS);
+    const integrity = await requestJson(`http://127.0.0.1:${port}/audit/integrity`, 5000, SCRIPT_AUTH_HEADERS);
     const healthPassed = health.status === 200 && health.payload && health.payload.status === "ok";
     const integrityPassed = integrity.status === 200 && integrity.payload && integrity.payload.integrity && integrity.payload.integrity.valid === true;
 

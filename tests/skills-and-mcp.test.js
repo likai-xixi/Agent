@@ -57,13 +57,19 @@ test("skill registry scans, requests approval, and installs approved tools-as-co
 test("MCP registry requires approval before mounting and stores approved npx mounts", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-registry-"));
   const workflow = createWorkflow(root);
+  let observedOptions = null;
+  const priorities = [];
   const registry = new McpRegistry({
     authorizationWorkflow: workflow,
     registryFile: path.join(root, "mcp-servers.json"),
-    spawn(command, args) {
+    nodeAssignment: "SATELLITE",
+    prioritySetter(pid, priority) {
+      priorities.push({ pid, priority });
+    },
+    spawn(command, args, options) {
+      observedOptions = options;
       return {
         pid: 4242,
-        unref() {},
         command,
         args
       };
@@ -89,4 +95,8 @@ test("MCP registry requires approval before mounting and stores approved npx mou
   });
   assert.equal(mount.pid, 4242);
   assert.equal(registry.listMounts().length, 1);
+  assert.equal(observedOptions.windowsHide, true);
+  assert.equal(observedOptions.timeout, 30000);
+  assert.equal(priorities.length, 1);
+  assert.equal(mount.priority_applied, true);
 });

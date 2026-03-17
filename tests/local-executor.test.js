@@ -89,6 +89,37 @@ test("local executor requests authorization for non-workspace writes and can con
   assert.equal(fs.readFileSync(targetFile, "utf8"), "authorized write");
 });
 
+test("local executor resolves symlinked workspace paths to physical targets before authorization", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "local-executor-realpath-"));
+  const workspace = path.join(root, "workspace");
+  const outside = path.join(root, "outside");
+  const linkedDir = path.join(workspace, "linked-outside");
+  fs.mkdirSync(workspace, { recursive: true });
+  fs.mkdirSync(outside, { recursive: true });
+  fs.symlinkSync(outside, linkedDir, process.platform === "win32" ? "junction" : "dir");
+
+  const authorizationWorkflow = createAuthorizationWorkflow(root);
+  const executor = new LocalExecutor({
+    workspaceRoot: workspace,
+    authorizationWorkflow,
+    stepJournal: new JsonlStepJournal({
+      filePath: path.join(root, "steps.jsonl")
+    }),
+    gitSafetyEnabled: false
+  });
+
+  await assert.rejects(() => executor.writeFile({
+    trace_id: "trace-realpath",
+    task_id: "task-realpath",
+    target_path: path.join(linkedDir, "symlinked.txt"),
+    content: "should request auth"
+  }));
+
+  const pending = authorizationWorkflow.requestStore.list("PENDING");
+  assert.equal(pending.length, 1);
+  assert.equal(String(pending[0].resource.target_path).includes("outside"), true);
+});
+
 test("local executor can resume interrupted move operations from steps journal", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "local-executor-resume-"));
   const workspace = path.join(root, "workspace");
@@ -132,6 +163,53 @@ test("local executor can resume interrupted move operations from steps journal",
   assert.equal(recovered[0].recovered, true);
   assert.equal(fs.existsSync(sourceFile), false);
   assert.equal(fs.readFileSync(destinationFile, "utf8"), "resume-me");
+});
+
+test("local executor records git sensitive scan blocks to steps journal", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "local-executor-git-safe-"));
+  const workspace = path.join(root, "workspace");
+  const skillsDir = path.join(workspace, "skills");
+  fs.mkdirSync(skillsDir, { recursive: true });
+  fs.writeFileSync(path.join(skillsDir, "tool.py"), "print('ok')\n", "utf8");
+  const stepsPath = path.join(root, "steps.jsonl");
+  const stepJournal = new JsonlStepJournal({
+    filePath: stepsPath
+  });
+  const authorizationWorkflow = createAuthorizationWorkflow(root);
+  authorizationWorkflow.policyStore.grantPathAccess(workspace, {
+    mode: "permanent",
+    actor: "tester",
+    trace_id: "trace-git-block"
+  });
+
+  const { runGit } = require("../src/platform/gitSafety");
+  runGit(workspace, ["init"]);
+  runGit(workspace, ["config", "user.name", "local-executor-test"]);
+  runGit(workspace, ["config", "user.email", "local-executor@example.com"]);
+  runGit(workspace, ["add", "--", "skills/tool.py"]);
+  runGit(workspace, ["commit", "-m", "baseline"]);
+  fs.writeFileSync(path.join(skillsDir, "tool.py"), "API_TOKEN = 'sk-live-secret'\n", "utf8");
+
+  const executor = new LocalExecutor({
+    workspaceRoot: workspace,
+    authorizationWorkflow,
+    stepJournal
+  });
+
+  await assert.rejects(() => executor.writeFile({
+    trace_id: "trace-git-block",
+    task_id: "task-git-block",
+    target_path: path.join(skillsDir, "tool.py"),
+    content: "updated"
+  }), /SENSITIVE_SYNC_BLOCKED/);
+
+  const records = stepJournal.getAllRecords();
+  assert.equal(records.some((record) => (
+    record.trace_id === "trace-git-block"
+      && record.stage === "git_sensitive_scan_blocked"
+      && record.metadata
+      && record.metadata.code === "SENSITIVE_SYNC_BLOCKED"
+  )), true);
 });
 
 test("local executor blocks obvious network commands when isolation is enabled", async () => {

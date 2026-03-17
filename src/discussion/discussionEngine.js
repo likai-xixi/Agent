@@ -1,5 +1,6 @@
 const { randomUUID, createHash } = require("crypto");
 const { AgentMailboxRouter } = require("./agentMailbox");
+const { PromptBuilder } = require("./promptBuilder");
 
 const DEFAULT_PARTICIPANTS = Object.freeze([
   "planner",
@@ -69,6 +70,7 @@ class DiscussionEngine {
     this.history = new Map();
     this.privateBuffers = new Map();
     this.mailboxRouter = options.mailboxRouter || new AgentMailboxRouter();
+    this.promptBuilder = options.promptBuilder || new PromptBuilder();
   }
 
   run({
@@ -80,6 +82,9 @@ class DiscussionEngine {
     actor = "operator",
     source = "discussion"
   }) {
+    const sanitizedPrompt = this.promptBuilder.buildModelPrompt({
+      prompt
+    });
     const activeParticipants = participants.length > 0 ? participants : this.defaultParticipants;
     const blindRoundOpinions = activeParticipants.map((participant) => {
       const profile = {
@@ -89,7 +94,7 @@ class DiscussionEngine {
       return buildOpinion({
         participant,
         task,
-        prompt,
+        prompt: sanitizedPrompt,
         profile
       });
     });
@@ -119,7 +124,7 @@ class DiscussionEngine {
       trace_id: task.trace_id,
       actor,
       source,
-      prompt,
+      prompt: sanitizedPrompt,
       participants: activeParticipants,
       blind_review_enabled: true,
       quorum,

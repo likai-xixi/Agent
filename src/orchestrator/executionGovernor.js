@@ -13,6 +13,7 @@ const {
   estimateTokens
 } = require("../platform/costControls");
 const { scrubSensitiveData } = require("../platform/sensitiveData");
+const { PromptBuilder } = require("../discussion/promptBuilder");
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -287,6 +288,7 @@ class ExecutionGovernor {
     this.knowledgeStore = options.knowledgeStore || new JsonlKnowledgeTransferStore(options.knowledgeStoreOptions || {});
     this.handoffSnapshotStore = options.handoffSnapshotStore || new JsonlHandoffSnapshotStore(options.handoffSnapshotStoreOptions || {});
     this.selfReflectionStore = options.selfReflectionStore || new JsonlSelfReflectionStore(options.selfReflectionStoreOptions || {});
+    this.promptBuilder = options.promptBuilder || new PromptBuilder();
   }
 
   estimateCost(provider, model, input) {
@@ -343,7 +345,11 @@ class ExecutionGovernor {
       }
     }
 
-    const scrubbedInput = scrubSensitiveData(outboundInput, {
+    const modelSafePrompt = this.promptBuilder.buildModelPrompt({
+      prompt: outboundInput,
+      sharedResults: metadata.shared_results || []
+    });
+    const scrubbedInput = scrubSensitiveData(modelSafePrompt, {
       allowedRoots: [process.cwd()]
     });
     const budget = this.budgetCircuitBreaker.assertRequestAllowed({

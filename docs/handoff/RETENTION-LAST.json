@@ -1,12 +1,12 @@
 {
-  "timestamp": "2026-03-17T02:10:13.596Z",
+  "timestamp": "2026-03-17T03:35:25.585Z",
   "archive_dir": "data\\audit-archive",
   "policy": {
     "min_archives": 0,
     "max_archives": 500,
     "max_age_days": 30
   },
-  "archive_count": 32,
+  "archive_count": 34,
   "integrity_failures": [],
   "stale_archives": [],
   "success": true,

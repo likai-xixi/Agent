@@ -3,6 +3,7 @@ const { randomUUID } = require("crypto");
 
 const { nowUtcIso } = require("./contracts");
 const { ensureDir, readJsonFile, resolveDataPath, writeJsonFile } = require("./appPaths");
+const { resolvePhysicalPath, startsWithPathPrefix } = require("./physicalPaths");
 
 const PATH_RULE_SCOPE = "PATH_ACCESS";
 const SKILL_RULE_SCOPE = "SKILL_LEVEL";
@@ -13,7 +14,7 @@ function clone(value) {
 }
 
 function normalizeRulePath(targetPath) {
-  return path.resolve(String(targetPath || "")).toLowerCase();
+  return resolvePhysicalPath(targetPath).physical_path.toLowerCase();
 }
 
 class JsonFilePolicyStore {
@@ -73,9 +74,9 @@ class JsonFilePolicyStore {
   isPathAllowed(targetPath, options = {}) {
     const normalizedTarget = normalizeRulePath(targetPath);
     const workspaceRoot = String(options.workspaceRoot || "").trim()
-      ? path.resolve(options.workspaceRoot)
+      ? resolvePhysicalPath(options.workspaceRoot).physical_path
       : "";
-    if (workspaceRoot && normalizedTarget.startsWith(workspaceRoot)) {
+    if (workspaceRoot && startsWithPathPrefix(normalizedTarget, workspaceRoot)) {
       return {
         allowed: true,
         reason: "WORKSPACE_SCOPE"
@@ -87,7 +88,7 @@ class JsonFilePolicyStore {
         continue;
       }
       const prefix = normalizeRulePath(rule.selector && rule.selector.path_prefix ? rule.selector.path_prefix : "");
-      if (!prefix || !normalizedTarget.startsWith(prefix)) {
+      if (!prefix || !startsWithPathPrefix(normalizedTarget, prefix)) {
         continue;
       }
       if (rule.mode === "single" && Number(rule.remaining_uses || 0) <= 0) {

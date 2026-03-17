@@ -10,7 +10,23 @@ const { JsonlAuditEventStore } = require("../src/orchestrator/auditEventStore");
 const { TaskOrchestrator } = require("../src/orchestrator/orchestratorService");
 const { DEFAULT_FLAGS } = require("../src/platform/featureFlags");
 
-function requestJson(baseUrl, method, pathname, body) {
+const SCRIPT_API_TOKEN = "load-test-static-token";
+const SCRIPT_AUTH_CONFIG = Object.freeze({
+  auth_enabled: true,
+  static_tokens: [
+    {
+      token: SCRIPT_API_TOKEN,
+      subject: "load-test-runner",
+      roles: ["task_admin", "read_only_auditor"],
+      mfa_verified: true
+    }
+  ]
+});
+const SCRIPT_AUTH_HEADERS = Object.freeze({
+  Authorization: `Bearer ${SCRIPT_API_TOKEN}`
+});
+
+function requestJson(baseUrl, method, pathname, body, headers = {}) {
   const target = new URL(`${baseUrl}${pathname}`);
   const payload = body ? JSON.stringify(body) : "";
   return new Promise((resolve, reject) => {
@@ -22,6 +38,7 @@ function requestJson(baseUrl, method, pathname, body) {
       path: `${target.pathname}${target.search}`,
       method,
       headers: {
+        ...headers,
         "Content-Type": "application/json",
         "Content-Length": Buffer.byteLength(payload)
       }
@@ -92,7 +109,7 @@ async function runScenario(baseUrl, index) {
     task_id: taskId,
     trace_id: traceId,
     task_type: "load-test"
-  });
+  }, SCRIPT_AUTH_HEADERS);
   latencies.push(created.latencyMs);
   if (created.status !== 201) {
     return { ok: false, latencies, stage: "create", status: created.status };
@@ -100,7 +117,7 @@ async function runScenario(baseUrl, index) {
 
   const approved = await requestJson(baseUrl, "POST", `/tasks/${taskId}/actions`, {
     action: "APPROVE"
-  });
+  }, SCRIPT_AUTH_HEADERS);
   latencies.push(approved.latencyMs);
   if (approved.status !== 200) {
     return { ok: false, latencies, stage: "approve", status: approved.status };
@@ -114,7 +131,7 @@ async function runScenario(baseUrl, index) {
     execution_options: {
       simulation: index % 2 === 0 ? { fail_providers: ["local"] } : {}
     }
-  });
+  }, SCRIPT_AUTH_HEADERS);
   latencies.push(takeover.latencyMs);
   if (takeover.status !== 200) {
     return { ok: false, latencies, stage: "takeover", status: takeover.status };
@@ -149,7 +166,8 @@ async function main() {
   const app = createTaskApiServer({
     host: "127.0.0.1",
     port: 0,
-    orchestrator
+    orchestrator,
+    authConfig: SCRIPT_AUTH_CONFIG
   });
 
   const start = performance.now();

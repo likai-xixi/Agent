@@ -178,3 +178,30 @@ test("execution governor blocks when provider balance is exhausted", async () =>
     return true;
   });
 });
+
+test("execution governor strips INNER_MONOLOGUE content before model execution", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "execution-governor-prompt-"));
+  const governor = createGovernor(root);
+  const task = {
+    trace_id: "trace-prompt",
+    task_id: "task-prompt",
+    task_type: "analysis",
+    metadata: {}
+  };
+
+  const prepared = await governor.prepareExecution({
+    task,
+    input: "Visible result\n[INNER_MONOLOGUE]do not leak[/INNER_MONOLOGUE]\nFinal answer",
+    metadata: {
+      shared_results: [
+        "Approved output [INNER_MONOLOGUE]hidden reasoning[/INNER_MONOLOGUE] ready"
+      ]
+    },
+    enabledProviders: ["gemini", "openai"]
+  });
+
+  assert.equal(prepared.outbound_input.includes("INNER_MONOLOGUE"), false);
+  assert.equal(prepared.outbound_input.includes("do not leak"), false);
+  assert.equal(prepared.outbound_input.includes("hidden reasoning"), false);
+  assert.equal(prepared.outbound_input.includes("Final answer"), true);
+});

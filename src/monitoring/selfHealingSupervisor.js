@@ -3,13 +3,15 @@ const path = require("path");
 const { randomUUID } = require("crypto");
 
 const { ensureDir, resolveDataPath } = require("../platform/appPaths");
-const { nowUtcIso } = require("../platform/contracts");
+const { nowUtcIso, ValidationError } = require("../platform/contracts");
+const { writeEncryptedBackup } = require("../platform/digitalSoulBackup");
 
 class SelfHealingSupervisor {
   constructor(options = {}) {
     this.staleAfterMs = Number(options.staleAfterMs || 30000);
     this.handoffSnapshotStore = options.handoffSnapshotStore || null;
     this.backupRoot = options.backupRoot || resolveDataPath("backups");
+    this.backupMasterKey = String(options.backupMasterKey || process.env.DIGITAL_SOUL_MASTER_KEY || process.env.BACKUP_MASTER_KEY || "");
     this.watchers = new Map();
   }
 
@@ -84,6 +86,9 @@ class SelfHealingSupervisor {
   }
 
   backupFiles(filePaths = []) {
+    if (!this.backupMasterKey) {
+      throw new ValidationError("DIGITAL_SOUL_MASTER_KEY or BACKUP_MASTER_KEY is required for encrypted backups");
+    }
     const timestamp = nowUtcIso().replace(/[:]/g, "-");
     const targetDir = path.join(this.backupRoot, timestamp);
     ensureDir(targetDir);
@@ -92,13 +97,18 @@ class SelfHealingSupervisor {
       if (!filePath || !fs.existsSync(filePath)) {
         continue;
       }
-      const targetFile = path.join(targetDir, path.basename(filePath));
-      fs.copyFileSync(filePath, targetFile);
+      const targetFile = path.join(targetDir, `${path.basename(filePath)}.enc`);
+      writeEncryptedBackup({
+        sourcePath: filePath,
+        targetFile,
+        masterKey: this.backupMasterKey
+      });
       copied.push(targetFile);
     }
     return {
       target_dir: targetDir,
-      copied
+      copied,
+      encrypted: true
     };
   }
 }
